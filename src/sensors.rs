@@ -130,7 +130,13 @@ async fn write<I2C>(i2c: &mut I2C, address: u8, bytes: &[u8]) -> Result<(), ()>
 where
     I2C: I2c,
 {
-    i2c.write(address, bytes).await.map_err(|_| ())
+    match i2c.write(address, bytes).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            warn!("I2C write error: address={}", address);
+            Err(())
+        }
+    }
 }
 
 async fn write_read<I2C>(
@@ -142,9 +148,13 @@ async fn write_read<I2C>(
 where
     I2C: I2c,
 {
-    i2c.write_read(address, command, buffer)
-        .await
-        .map_err(|_| ())
+    match i2c.write_read(address, command, buffer).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            warn!("I2C write_read error: address={}", address);
+            Err(())
+        }
+    }
 }
 
 async fn sht41_measure<I2C>(i2c: &mut I2C) -> Option<(i16, u16)>
@@ -156,12 +166,13 @@ where
     let mut data = [0; 6];
     read(i2c, SHT41, &mut data).await.ok()?;
     if crc8(&data[0..2]) != data[2] || crc8(&data[3..5]) != data[5] {
+        warn!("SHT41 CRC error");
         return None;
     }
-    let temperature =
-        -4_500i32 + (17_500i32 * u16::from_be_bytes([data[0], data[1]]) as i32) / 65_535;
-    let humidity = -6_000i32 + (12_500i32 * u16::from_be_bytes([data[3], data[4]]) as i32) / 65_535;
-    Some((temperature as i16, humidity.clamp(0, 10_000) as u16))
+    Some(decode_sensirion_temperature_humidity(
+        u16::from_be_bytes([data[0], data[1]]),
+        u16::from_be_bytes([data[3], data[4]]),
+    ))
 }
 
 async fn sgp41_condition<I2C>(i2c: &mut I2C) -> bool
@@ -181,8 +192,12 @@ where
     // The conditioning command returns one raw VOC word and its CRC. Consume
     // and validate it before issuing the next command.
     let mut data = [0; 3];
-    if read(i2c, SGP41, &mut data).await.is_err() || crc8(&data[0..2]) != data[2] {
+    if read(i2c, SGP41, &mut data).await.is_err() {
         warn!("SGP41 conditioning read failed");
+        return false;
+    }
+    if crc8(&data[0..2]) != data[2] {
+        warn!("SGP41 conditioning CRC error");
         return false;
     }
     true
@@ -194,13 +209,21 @@ where
 {
     let args = compensated_args(temperature, humidity);
     let mut command = [0; 8];
-    command[..2].copy_from_slice(&[0x26, 0x0f]);
+    // SGP41 measure_raw_signals command (the SGP40 command is 0x260F).
+    command[..2].copy_from_slice(&[0x26, 0x19]);
     command[2..].copy_from_slice(&args);
-    write(i2c, SGP41, &command).await.ok()?;
+    if write(i2c, SGP41, &command).await.is_err() {
+        warn!("SGP41 measurement command failed");
+        return None;
+    }
     Timer::after(Duration::from_millis(50)).await;
     let mut data = [0; 6];
-    read(i2c, SGP41, &mut data).await.ok()?;
+    if read(i2c, SGP41, &mut data).await.is_err() {
+        warn!("SGP41 measurement read failed");
+        return None;
+    }
     if crc8(&data[0..2]) != data[2] || crc8(&data[3..5]) != data[5] {
+        warn!("SGP41 measurement CRC error");
         return None;
     }
     Some((
@@ -253,6 +276,7 @@ where
         .await
         .ok()?;
     if crc8(&data[0..2]) != data[2] {
+        warn!("SCD41 ready CRC error");
         return None;
     }
     Some(u16::from_be_bytes([data[0], data[1]]) & 0x07ff != 0)
@@ -268,13 +292,15 @@ where
         .ok()?;
     if crc8(&data[0..2]) != data[2] || crc8(&data[3..5]) != data[5] || crc8(&data[6..8]) != data[8]
     {
+        warn!("SCD41 measurement CRC error");
         return None;
     }
     let co2 = u16::from_be_bytes([data[0], data[1]]);
-    let temperature =
-        -4_500i32 + (17_500i32 * u16::from_be_bytes([data[3], data[4]]) as i32) / 65_535;
-    let humidity = -6_000i32 + (12_500i32 * u16::from_be_bytes([data[6], data[7]]) as i32) / 65_535;
-    Some((co2, temperature as i16, humidity.clamp(0, 10_000) as u16))
+    let (temperature, humidity) = decode_sensirion_temperature_humidity(
+        u16::from_be_bytes([data[3], data[4]]),
+        u16::from_be_bytes([data[6], data[7]]),
+    );
+    Some((co2, temperature, humidity))
 }
 
 async fn bmp580_init<I2C>(i2c: &mut I2C) -> bool
@@ -306,21 +332,39 @@ where
 {
     let mut data = [0; 6];
     write_read(i2c, BMP580, &[0x1d], &mut data).await.ok()?;
-    let pressure_raw = u32::from_le_bytes([data[0], data[1], data[2], 0]);
+    Some(decode_bmp580(data))
+}
+
+fn decode_sensirion_temperature_humidity(temperature_raw: u16, humidity_raw: u16) -> (i16, u16) {
+    let temperature = -4_500i32 + (17_500i32 * temperature_raw as i32) / 65_535;
+    let humidity = -6_000i32 + (12_500i32 * humidity_raw as i32) / 65_535;
+    (temperature as i16, humidity.clamp(0, 10_000) as u16)
+}
+
+fn decode_bmp580(data: [u8; 6]) -> (u32, i16) {
+    // BMP580 exposes temperature first (0x1D..0x1F), followed by pressure
+    // (0x20..0x22). Temperature is signed Q8.16 °C and pressure is Q18.6 Pa.
     let temperature_raw = i32::from_le_bytes([
-        data[3],
-        data[4],
-        data[5],
-        if data[5] & 0x80 != 0 { 0xff } else { 0 },
+        data[0],
+        data[1],
+        data[2],
+        if data[2] & 0x80 != 0 { 0xff } else { 0 },
     ]);
-    Some((pressure_raw / 64, (temperature_raw * 100 / 65_536) as i16))
+    let pressure_raw = u32::from_le_bytes([data[3], data[4], data[5], 0]);
+    (pressure_raw / 64, (temperature_raw * 100 / 65_536) as i16)
 }
 
 async fn read<I2C>(i2c: &mut I2C, address: u8, buffer: &mut [u8]) -> Result<(), ()>
 where
     I2C: I2c,
 {
-    i2c.read(address, buffer).await.map_err(|_| ())
+    match i2c.read(address, buffer).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            warn!("I2C read error: address={}", address);
+            Err(())
+        }
+    }
 }
 
 fn crc8(bytes: &[u8]) -> u8 {
@@ -340,10 +384,28 @@ fn crc8(bytes: &[u8]) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::crc8;
+    use super::{crc8, decode_bmp580, decode_sensirion_temperature_humidity};
 
     #[test]
     fn sensirion_crc_matches_reference() {
         assert_eq!(crc8(&[0xbe, 0xef]), 0x92);
+    }
+
+    #[test]
+    fn sensirion_fixed_point_conversion_is_scaled_and_clamped() {
+        assert_eq!(decode_sensirion_temperature_humidity(0, 0), (-4_500, 0));
+        assert_eq!(
+            decode_sensirion_temperature_humidity(u16::MAX, u16::MAX),
+            (13_000, 10_000)
+        );
+    }
+
+    #[test]
+    fn bmp580_register_order_and_scaling_are_correct() {
+        // 25 °C as signed Q8.16, followed by 100,000 Pa as Q18.6.
+        assert_eq!(
+            decode_bmp580([0x00, 0x00, 0x19, 0x00, 0xa8, 0x61]),
+            (100_000, 2_500)
+        );
     }
 }
