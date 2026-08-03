@@ -78,9 +78,18 @@ where
                 2_500
             };
             if let Some((voc_raw, nox_raw)) = sgp41_measure(&mut i2c, temperature, humidity).await {
-                snapshot.sgp41_voc_index = voc_algorithm.process(voc_raw as i32) as u16;
-                snapshot.sgp41_nox_index = nox_algorithm.process(nox_raw as i32) as u16;
-                snapshot.status |= SGP41_OK;
+                let voc_index = voc_algorithm.process(voc_raw as i32) as u16;
+                let nox_index = nox_algorithm.process(nox_raw as i32) as u16;
+                snapshot.sgp41_voc_index = voc_index;
+                snapshot.sgp41_nox_index = nox_index;
+                // The gas-index algorithm returns zero during its startup
+                // blackout. Do not advertise SGP41 as valid until both
+                // processed values are available.
+                if voc_index != 0 && nox_index != 0 {
+                    snapshot.status |= SGP41_OK;
+                } else {
+                    snapshot.status &= !SGP41_OK;
+                }
             } else {
                 snapshot.status &= !SGP41_OK;
                 warn!("SGP41 read failed");

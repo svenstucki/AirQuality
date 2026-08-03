@@ -82,9 +82,10 @@ Service UUID:
 | SGP41 NOx index | `7c3e1009-4e0a-4a69-9c57-6b5f3f1c0000` | Read, Notify | Unsigned 16-bit index, 0–500 |
 | Sensor status | `7c3e100a-4e0a-4a69-9c57-6b5f3f1c0000` | Read, Notify | Bitmask; bit 0 SHT41, bit 1 SCD41, bit 2 BMP580, bit 3 SGP41 |
 
-A status bit is set when that sensor's latest read succeeded. A cleared bit
-means the value may be stale or unavailable. SGP41 indices remain zero during
-the algorithm's initial warm-up period.
+A status bit is set when that sensor has produced a valid current value. A
+cleared bit means the value may be stale or unavailable. SGP41 indices remain
+zero during the algorithm's initial warm-up period, and its status bit remains
+clear until both VOC and NOx indices are nonzero.
 
 ### RGB LED service
 
