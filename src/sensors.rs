@@ -35,10 +35,13 @@ where
     let mut snapshot = SensorSnapshot::default();
     let mut scd_started = false;
     let mut bmp_initialized = false;
+    let mut sgp_conditioning_cycles = 0u8;
     let mut sgp_initialized = false;
     let mut voc_algorithm = GasIndexAlgorithm::new(AlgorithmType::Voc, 1.0);
     let mut nox_algorithm = GasIndexAlgorithm::new(AlgorithmType::Nox, 1.0);
 
+    // Allow externally powered sensor modules to finish their power-up sequence.
+    Timer::after(Duration::from_millis(100)).await;
     info!("sensor polling started: SHT41=0x44 SGP41=0x59 SCD41=0x62 BMP580=0x47");
 
     loop {
@@ -52,9 +55,14 @@ where
         }
 
         if !sgp_initialized {
-            sgp_initialized = sgp41_condition(&mut i2c).await;
-        }
-        if sgp_initialized {
+            if sgp41_condition(&mut i2c).await {
+                sgp_conditioning_cycles += 1;
+                if sgp_conditioning_cycles >= 10 {
+                    sgp_initialized = true;
+                    info!("SGP41 conditioning complete");
+                }
+            }
+        } else {
             let humidity = if snapshot.status & SHT41_OK != 0 {
                 snapshot.sht41_humidity_centi_percent
             } else {
@@ -169,6 +177,14 @@ where
         return false;
     }
     Timer::after(Duration::from_millis(50)).await;
+
+    // The conditioning command returns one raw VOC word and its CRC. Consume
+    // and validate it before issuing the next command.
+    let mut data = [0; 3];
+    if read(i2c, SGP41, &mut data).await.is_err() || crc8(&data[0..2]) != data[2] {
+        warn!("SGP41 conditioning read failed");
+        return false;
+    }
     true
 }
 
@@ -213,9 +229,14 @@ async fn scd41_start<I2C>(i2c: &mut I2C) -> bool
 where
     I2C: I2c,
 {
+    // The SCD41 can keep measuring while the ESP32 is reset. Stop an existing
+    // session first; an error here is expected when the sensor was idle.
+    if write(i2c, SCD41, &[0x3f, 0x86]).await.is_ok() {
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
     if write(i2c, SCD41, &[0x21, 0xb1]).await.is_ok() {
         info!("SCD41 periodic measurement started");
-        Timer::after(Duration::from_millis(10)).await;
         true
     } else {
         warn!("SCD41 start command failed");
