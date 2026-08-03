@@ -32,7 +32,11 @@ pub async fn run<I2C>(mut i2c: I2C, updates: &Signal<CriticalSectionRawMutex, Se
 where
     I2C: I2c,
 {
-    let mut snapshot = SensorSnapshot::default();
+    // No sensor has produced a validated measurement at startup.
+    let mut snapshot = SensorSnapshot {
+        status: 0,
+        ..SensorSnapshot::default()
+    };
     let mut scd_started = false;
     let mut bmp_initialized = false;
     let mut sgp_conditioning_cycles = 0u8;
