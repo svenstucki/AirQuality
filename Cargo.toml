@@ -14,6 +14,7 @@ embassy-time = { version = "0.5", features = ["defmt", "generic-queue-8"] }
 embedded-hal-async = "1.0"
 esp-alloc = "0.10"
 esp-backtrace = { version = "0.19", features = ["esp32c6", "defmt", "panic-handler"] }
+esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c6"] }
 esp-hal = { version = "1.1.1", features = ["esp32c6", "unstable", "rt", "defmt"] }
 esp-radio = { version = "0.18", features = ["esp32c6", "ble", "defmt", "unstable"] }
 esp-rtos = { version = "0.3", features = ["esp32c6", "embassy", "esp-radio", "defmt"] }

@@ -41,8 +41,11 @@ use its built-in USB-JTAG-Serial interface as a probe-rs debug probe. Connect
 the board, then flash and monitor with:
 
 ```text
-cargo embed --release
+cargo embed
 ```
+
+Debug builds are the default for this project; use a release build only when
+explicitly requested.
 
 `Embed.toml` enables RTT and decodes channel 0 as defmt. The default log level
 is `info`; override it for a one-off build with `DEFMT_LOG=debug` or by using a
@@ -105,7 +108,7 @@ bytes before writing them.
 
 ## Logging and troubleshooting
 
-Use `cargo embed --release` to view logs. Normal startup reports the configured
+Use `cargo embed` to flash, reset, and view logs. Normal startup reports the configured
 pins, sensor addresses, BLE advertising, and successful sensor initialization.
 Repeated sensor warnings indicate an I²C wiring, power, address, or pull-up
 problem; they do not indicate a firmware-wide failure.
