@@ -1,0 +1,14 @@
+[default.general]
+chip = "esp32c6"
+
+[default.flashing]
+enabled = true
+
+[default.reset]
+enabled = true
+halt_afterwards = false
+
+[default.rtt]
+enabled = true
+show_timestamps = true
+up_channels = [{ channel = 0, mode = "BlockIfFull", format = "Defmt" }]

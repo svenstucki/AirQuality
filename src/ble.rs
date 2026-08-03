@@ -1,0 +1,259 @@
+use defmt::{info, warn};
+use embassy_futures::join::join;
+use embassy_futures::select::{Either, select};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use esp_hal::peripherals::BT;
+use trouble_host::prelude::*;
+
+use crate::{led, sensors::SensorSnapshot};
+
+#[gatt_service(uuid = "7c3e1000-4e0a-4a69-9c57-6b5f3f1c0000")]
+pub struct AirQualityService {
+    #[characteristic(uuid = "7c3e1001-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub sht41_temperature: [u8; 2],
+    #[characteristic(uuid = "7c3e1002-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub sht41_humidity: [u8; 2],
+    #[characteristic(uuid = "7c3e1003-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub scd41_co2: [u8; 2],
+    #[characteristic(uuid = "7c3e1004-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub scd41_temperature: [u8; 2],
+    #[characteristic(uuid = "7c3e1005-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub scd41_humidity: [u8; 2],
+    #[characteristic(uuid = "7c3e1006-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0, 0, 0])]
+    pub bmp580_pressure: [u8; 4],
+    #[characteristic(uuid = "7c3e1007-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub bmp580_temperature: [u8; 2],
+    #[characteristic(uuid = "7c3e1008-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub sgp41_voc: [u8; 2],
+    #[characteristic(uuid = "7c3e1009-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0, 0])]
+    pub sgp41_nox: [u8; 2],
+    #[characteristic(uuid = "7c3e100a-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = 0)]
+    pub status: u8,
+}
+
+#[gatt_service(uuid = "7c3e2000-4e0a-4a69-9c57-6b5f3f1c0000")]
+pub struct RgbLedService {
+    #[characteristic(uuid = "7c3e2001-4e0a-4a69-9c57-6b5f3f1c0000", read, write, write_without_response, notify, value = [0, 0, 0])]
+    pub color: [u8; 3],
+}
+
+#[gatt_server]
+pub struct Server {
+    pub air_quality: AirQualityService,
+    pub rgb_led: RgbLedService,
+}
+
+pub async fn run(
+    bluetooth: BT<'static>,
+    mut led_driver: led::Led<'static>,
+    updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+) -> ! {
+    let connector = esp_radio::ble::controller::BleConnector::new(bluetooth, Default::default())
+        .expect("BLE connector initialization failed");
+    let controller: ExternalController<_, 20> = ExternalController::new(connector);
+    let mut resources: HostResources<DefaultPacketPool, 1, 2> = HostResources::new();
+    let stack = trouble_host::new(controller, &mut resources);
+    let host = stack.build();
+    let Host {
+        mut runner,
+        mut peripheral,
+        ..
+    } = host;
+    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name: "AirQuality",
+        appearance: &appearance::sensor::GENERIC_SENSOR,
+    }))
+    .expect("GATT server initialization failed");
+
+    info!("BLE advertising as AirQuality");
+
+    let _ = join(
+        async {
+            loop {
+                if runner.run().await.is_err() {
+                    warn!("BLE controller runner stopped; restarting");
+                }
+            }
+        },
+        async {
+            loop {
+                let mut adv_data = [0; 31];
+                let len = AdStructure::encode_slice(
+                    &[
+                        AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                        AdStructure::CompleteLocalName(b"AirQuality"),
+                    ],
+                    &mut adv_data,
+                )
+                .unwrap();
+                let advertiser = peripheral
+                    .advertise(
+                        &Default::default(),
+                        Advertisement::ConnectableScannableUndirected {
+                            adv_data: &adv_data[..len],
+                            scan_data: &[],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let conn = advertiser
+                    .accept()
+                    .await
+                    .unwrap()
+                    .with_attribute_server(&server)
+                    .unwrap();
+                let current = updates.wait().await;
+                set_server_snapshot(&server, current);
+                handle_connection(conn, &server, &mut led_driver, updates).await;
+                info!("BLE client disconnected");
+            }
+        },
+    )
+    .await;
+    loop {}
+}
+
+async fn handle_connection<C>(
+    conn: GattConnection<'_, '_, C>,
+    server: &Server<'_>,
+    led_driver: &mut led::Led<'_>,
+    updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+) where
+    C: PacketPool,
+{
+    loop {
+        match select(conn.next(), notify_updates(&conn, server, updates)).await {
+            Either::First(GattConnectionEvent::Disconnected { .. }) => break,
+            Either::First(GattConnectionEvent::Gatt { event }) => match event {
+                GattEvent::Write(write) if write.handle() == server.rgb_led.color.handle => {
+                    let data = write.data();
+                    let mut applied_color = None;
+                    if data.len() == 3 {
+                        let color = [data[0], data[1], data[2]];
+                        if led_driver.write_rgb(color).is_ok() {
+                            info!("RGB LED updated: {}, {}, {}", color[0], color[1], color[2]);
+                            let _ = server.set(&server.rgb_led.color, &color);
+                            applied_color = Some(color);
+                        } else {
+                            warn!("RGB LED write failed");
+                        }
+                    }
+                    if let Ok(reply) = write.accept() {
+                        reply.send().await;
+                    }
+                    if let Some(color) = applied_color {
+                        let _ = server.rgb_led.color.notify(&conn, &color).await;
+                    }
+                }
+                event => {
+                    if let Ok(reply) = event.accept() {
+                        reply.send().await;
+                    }
+                }
+            },
+            Either::First(_) => {}
+            Either::Second(_) => {}
+        }
+    }
+}
+
+async fn notify_updates<C>(
+    conn: &GattConnection<'_, '_, C>,
+    server: &Server<'_>,
+    updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+) where
+    C: PacketPool,
+{
+    let snapshot = updates.wait().await;
+    set_server_snapshot(server, snapshot);
+    let _ = server
+        .air_quality
+        .sht41_temperature
+        .notify(conn, &snapshot.sht41_temperature_centi_c.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .sht41_humidity
+        .notify(conn, &snapshot.sht41_humidity_centi_percent.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .scd41_co2
+        .notify(conn, &snapshot.scd41_co2_ppm.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .scd41_temperature
+        .notify(conn, &snapshot.scd41_temperature_centi_c.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .scd41_humidity
+        .notify(conn, &snapshot.scd41_humidity_centi_percent.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .bmp580_pressure
+        .notify(conn, &snapshot.bmp580_pressure_pa.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .bmp580_temperature
+        .notify(conn, &snapshot.bmp580_temperature_centi_c.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .sgp41_voc
+        .notify(conn, &snapshot.sgp41_voc_index.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .sgp41_nox
+        .notify(conn, &snapshot.sgp41_nox_index.to_le_bytes())
+        .await;
+    let _ = server
+        .air_quality
+        .status
+        .notify(conn, &snapshot.status)
+        .await;
+}
+
+fn set_server_snapshot(server: &Server, snapshot: SensorSnapshot) {
+    let _ = server.set(
+        &server.air_quality.sht41_temperature,
+        &snapshot.sht41_temperature_centi_c.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.sht41_humidity,
+        &snapshot.sht41_humidity_centi_percent.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.scd41_co2,
+        &snapshot.scd41_co2_ppm.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.scd41_temperature,
+        &snapshot.scd41_temperature_centi_c.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.scd41_humidity,
+        &snapshot.scd41_humidity_centi_percent.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.bmp580_pressure,
+        &snapshot.bmp580_pressure_pa.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.bmp580_temperature,
+        &snapshot.bmp580_temperature_centi_c.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.sgp41_voc,
+        &snapshot.sgp41_voc_index.to_le_bytes(),
+    );
+    let _ = server.set(
+        &server.air_quality.sgp41_nox,
+        &snapshot.sgp41_nox_index.to_le_bytes(),
+    );
+    let _ = server.set(&server.air_quality.status, &snapshot.status);
+}

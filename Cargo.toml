@@ -1,0 +1,31 @@
+[package]
+name = "air-quality"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+defmt = "1.0"
+defmt-rtt = "1.0"
+embassy-executor = "0.10"
+embassy-futures = "0.1"
+embassy-sync = { version = "0.7", features = ["defmt"] }
+embassy-time = { version = "0.5", features = ["defmt", "generic-queue-8"] }
+embedded-hal-async = "1.0"
+esp-alloc = "0.10"
+esp-backtrace = { version = "0.19", features = ["esp32c6", "defmt", "panic-handler"] }
+esp-hal = { version = "1.1.1", features = ["esp32c6", "unstable", "rt", "defmt"] }
+esp-radio = { version = "0.18", features = ["esp32c6", "ble", "defmt", "unstable"] }
+esp-rtos = { version = "0.3", features = ["esp32c6", "embassy", "esp-radio", "defmt"] }
+gas-index-algorithm = "0.1"
+static_cell = "2.1"
+trouble-host = { version = "0.6", default-features = false, features = ["peripheral", "gatt", "derive", "defmt", "default-packet-pool"] }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+debug = 2
+lto = "fat"
+opt-level = "s"
+overflow-checks = true
