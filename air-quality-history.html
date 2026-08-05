@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <title>AirQuality history</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08111f;
+      --panel: rgba(18, 32, 54, 0.88);
+      --panel-strong: #14243d;
+      --line: rgba(178, 204, 238, 0.14);
+      --text: #eff6ff;
+      --muted: #9db0c8;
+      --blue: #66b5ff;
+      --cyan: #5de1da;
+      --green: #69dfa0;
+      --amber: #ffca70;
+      --red: #ff8d92;
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 5% 0%, rgba(76, 145, 230, 0.24), transparent 32rem),
+        radial-gradient(circle at 100% 15%, rgba(65, 205, 188, 0.12), transparent 27rem),
+        var(--bg);
+      font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled, select:disabled { cursor: not-allowed; opacity: 0.48; }
+    .shell { width: min(1220px, calc(100% - 36px)); margin: 0 auto; padding: 42px 0 54px; }
+    .topbar, .connection-row, .section-heading, .control-row, .button-row,
+    .card-heading, .status-value, .chart-toolbar, .table-toolbar { display: flex; align-items: center; }
+    .topbar { justify-content: space-between; gap: 24px; margin-bottom: 34px; }
+    .eyebrow { margin: 0 0 8px; color: var(--cyan); font-size: 11px; font-weight: 800; letter-spacing: 0.18em; text-transform: uppercase; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(30px, 5vw, 48px); line-height: 1.03; letter-spacing: -0.04em; }
+    h2 { margin-bottom: 0; font-size: 19px; letter-spacing: -0.02em; }
+    h3 { margin-bottom: 0; font-size: 15px; }
+    .subtitle { max-width: 700px; margin-bottom: 0; color: var(--muted); font-size: 16px; }
+    .connection-row { justify-content: flex-end; flex-wrap: wrap; gap: 11px; }
+
+    .connection-pill, .health-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .connection-pill { padding: 9px 13px; background: rgba(255,255,255,0.045); }
+    .connection-pill::before, .health-badge::before { width: 7px; height: 7px; border-radius: 50%; content: ""; background: currentColor; }
+    .connection-pill.connected, .health-badge.good { color: var(--green); }
+    .connection-pill.connecting, .health-badge.stale { color: var(--amber); }
+    .connection-pill.error { color: var(--red); }
+    .health-badge { padding: 6px 9px; color: var(--green); background: rgba(105, 223, 160, 0.08); }
+    .health-badge.stale { background: rgba(255, 202, 112, 0.08); }
+    .health-badge.offline { color: var(--muted); background: rgba(255,255,255,0.04); }
+    .button {
+      border: 0;
+      border-radius: 11px;
+      padding: 11px 17px;
+      color: #06111e;
+      background: linear-gradient(135deg, #89d2ff, #62e0d5);
+      box-shadow: 0 8px 26px rgba(91, 200, 221, 0.2);
+      font-weight: 800;
+      transition: transform 150ms ease, filter 150ms ease, opacity 150ms ease;
+    }
+    .button:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+    .button:active:not(:disabled) { transform: translateY(0); }
+    .button.secondary { color: var(--text); background: rgba(255,255,255,0.08); box-shadow: none; }
+    .button.danger { color: #fff0f1; background: rgba(161, 53, 67, 0.72); box-shadow: none; }
+
+    .notice { display: none; margin: 0 0 24px; padding: 13px 16px; border: 1px solid rgba(255, 141, 146, 0.3); border-radius: 12px; color: #ffd8da; background: rgba(117, 35, 48, 0.26); }
+    .notice.visible { display: block; }
+    .notice.info { border-color: rgba(102, 181, 255, 0.3); color: #d7edff; background: rgba(31, 91, 145, 0.25); }
+    .notice.success { border-color: rgba(105, 223, 160, 0.3); color: #d9ffe9; background: rgba(35, 116, 78, 0.24); }
+
+    .section { margin-top: 31px; }
+    .section-heading { justify-content: space-between; gap: 20px; margin-bottom: 15px; }
+    .section-heading p, .helper { margin-bottom: 0; color: var(--muted); font-size: 13px; }
+    .panel, .status-card {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(24, 44, 73, 0.92), rgba(15, 27, 47, 0.9));
+      box-shadow: var(--shadow);
+    }
+    .panel { border-radius: 18px; padding: 24px; }
+    .status-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+    .status-card { min-height: 112px; border-radius: 14px; padding: 11px 17px 8px; box-shadow: none; }
+    .status-card h3 { color: var(--muted); font-size: 12px; font-weight: 650; }
+    .status-card > h3 + div { margin-top: 3px; }
+    .status-card > h3 + .health-badge { margin-top: 3px; }
+    .status-value { height: 35px; min-height: 35px; gap: 9px; margin-top: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.03em; }
+    .status-card > .health-badge { height: 35px; margin-top: 0; }
+    .status-detail { display: flex; align-items: center; height: 35px; min-height: 35px; margin: 0; color: var(--muted); font-size: 11px; }
+    .controls-panel { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: center; }
+    .controls-panel h2 { margin-bottom: 5px; }
+    .control-row { flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
+    .range-line { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 13px; color: var(--muted); font-size: 12px; }
+
+    .retrieval-panel { padding-bottom: 17px; }
+    .retrieval-top { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+    .retrieval-top h2 { margin-bottom: 5px; }
+    .button-row { justify-content: flex-end; flex-wrap: wrap; gap: 9px; }
+    .progress-wrap { display: none; margin-top: 19px; }
+    .progress-wrap.visible { display: block; }
+    .progress-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+    progress { width: 100%; height: 7px; accent-color: var(--cyan); }
+    .chart-toolbar { justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+    .toolbar-controls { display: flex; flex-wrap: wrap; gap: 9px; }
+    select { min-width: 190px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; color: var(--text); background: rgba(255,255,255,0.07); }
+    .canvas-wrap { position: relative; min-height: 360px; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: rgba(5, 14, 26, 0.5); }
+    #history-chart { display: block; width: 100%; height: 360px; }
+    .chart-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; pointer-events: none; }
+    .tooltip { position: absolute; display: none; max-width: 230px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: rgba(8, 17, 31, 0.95); box-shadow: var(--shadow); font-size: 12px; pointer-events: none; }
+    .chart-legend { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+    .table-toolbar { justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 11px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; min-width: 720px; font-size: 12px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+    th { color: var(--muted); background: rgba(255,255,255,0.035); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    td.missing { color: var(--muted); }
+    code { color: #c8e6ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+    footer { margin-top: 31px; color: var(--muted); font-size: 12px; }
+    .footer-line { justify-content: space-between; gap: 16px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--line); }
+
+    @media (max-width: 1000px) { .status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 24px, 620px); padding-top: 27px; }
+      .topbar { align-items: flex-start; flex-direction: column; gap: 18px; }
+      .connection-row { justify-content: flex-start; }
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .controls-panel { grid-template-columns: 1fr; }
+      .control-row { justify-content: flex-start; }
+      .retrieval-top { flex-direction: column; }
+    }
+    @media (max-width: 430px) {
+      .panel { padding: 17px; }
+      .status-card { min-height: 100px; padding: 11px 17px 8px; }
+      .section-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .status-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
+      .status-value { font-size: 18px; }
+      .toolbar-controls, select, .toolbar-controls .button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ESP32-C6 · persistent history</p>
+        <h1>AirQuality history.</h1>
+        <p class="subtitle">Manage the board’s rolling measurement archive, synchronize its clock, and explore up to 30 days of stored data.</p>
+      </div>
+      <div class="connection-row">
+        <span id="connection-pill" class="connection-pill">Disconnected</span>
+        <button id="connect-button" class="button" type="button">Connect sensor</button>
+      </div>
+    </header>
+
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+    <section class="section" aria-labelledby="storage-heading">
+      <div class="section-heading">
+        <h2 id="storage-heading">Storage status</h2>
+        <p>History is aggregated at one record per minute.</p>
+      </div>
+      <div class="status-grid">
+        <article class="status-card"><h3>Storage</h3><div id="storage-enabled" class="health-badge offline">Offline</div><p class="status-detail">Persistent logging</p></article>
+        <article class="status-card"><h3>Board clock</h3><div id="clock-status" class="health-badge offline">Offline</div><p id="clock-detail" class="status-detail">Sync required after reboot</p></article>
+        <article class="status-card"><h3>Records</h3><div id="record-count" class="status-value">—</div><p class="status-detail">Stored measurements</p></article>
+        <article class="status-card"><h3>Coverage</h3><div id="coverage" class="status-value">—</div><p class="status-detail">Approximate archive span</p></article>
+        <article class="status-card"><h3>Oldest</h3><div id="oldest-time" class="status-value">—</div><p id="oldest-detail" class="status-detail">—</p></article>
+        <article class="status-card"><h3>Newest</h3><div id="newest-time" class="status-value">—</div><p id="newest-detail" class="status-detail">—</p></article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="controls-heading">
+      <div class="panel controls-panel">
+        <div>
+          <p class="eyebrow">Board controls</p>
+          <h2 id="controls-heading">History and clock</h2>
+          <p class="helper">Clock sync uses this computer’s current UTC time. New records after synchronization are stored as UTC; rebooting requires synchronization again.</p>
+          <div class="range-line"><span>Storage region: <code>0x200000–0x400000</code></span><span>Capacity: approximately 30 days</span></div>
+        </div>
+        <div class="control-row">
+          <button id="storage-toggle" class="button secondary" type="button" disabled>Enable storage</button>
+          <button id="sync-clock" class="button secondary" type="button" disabled>Sync board clock</button>
+          <button id="erase-history" class="button danger" type="button" disabled>Erase history</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="retrieval-heading">
+      <div class="panel retrieval-panel">
+        <div class="retrieval-top">
+          <div>
+            <p class="eyebrow">BLE transfer</p>
+            <h2 id="retrieval-heading">Retrieve history</h2>
+            <p class="helper">The board sends at most five records per notification. Retrieval may take a little time for a full archive.</p>
+          </div>
+          <div class="button-row">
+            <button id="retrieve-button" class="button" type="button" disabled>Retrieve stored data</button>
+            <button id="clear-button" class="button secondary" type="button" disabled>Clear local data</button>
+          </div>
+        </div>
+        <div id="progress-wrap" class="progress-wrap">
+          <div class="progress-label"><span id="progress-label">Preparing retrieval…</span><span id="progress-count">0 records</span></div>
+          <progress id="retrieval-progress" value="0" max="1"></progress>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="graph-heading">
+      <div class="section-heading">
+        <h2 id="graph-heading">History graph</h2>
+        <p id="graph-summary">Retrieve data to populate the graph.</p>
+      </div>
+      <div class="panel">
+        <div class="chart-toolbar">
+          <div class="toolbar-controls">
+            <select id="metric-select" aria-label="Graph metric" disabled></select>
+            <select id="segment-select" aria-label="Time segment" disabled></select>
+          </div>
+          <button id="export-button" class="button secondary" type="button" disabled>Export CSV</button>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="history-chart" aria-label="Historical sensor graph"></canvas>
+          <div id="chart-empty" class="chart-empty">No history loaded yet.</div>
+          <div id="chart-tooltip" class="tooltip"></div>
+        </div>
+        <p id="chart-legend" class="chart-legend">UTC and uptime records are shown in separate time segments.</p>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="table-heading">
+      <div class="section-heading">
+        <h2 id="table-heading">Retrieved records</h2>
+        <p id="table-summary">No records loaded.</p>
+      </div>
+      <div class="panel">
+        <div class="table-toolbar"><span class="helper">Missing values are blank because the firmware only stores fields with a fresh reading.</span><span id="table-limit" class="helper"></span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Sequence</th><th>Mode</th><th>CO₂</th><th>SHT41 temp</th><th>SHT41 RH</th><th>VOC</th><th>NOx</th></tr></thead>
+            <tbody id="record-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="footer-line">
+        <span>AirQuality · direct Bluetooth connection</span>
+        <span>History service <code>7c3e3000…0000</code></span>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const DEVICE_NAME = 'AirQuality';
+      const STORAGE_SERVICE_UUID = '7c3e3000-4e0a-4a69-9c57-6b5f3f1c0000';
+      const UUID = {
+        control: '7c3e3001-4e0a-4a69-9c57-6b5f3f1c0000',
+        clockSync: '7c3e3002-4e0a-4a69-9c57-6b5f3f1c0000',
+        metadata: '7c3e3003-4e0a-4a69-9c57-6b5f3f1c0000',
+        historyRequest: '7c3e3004-4e0a-4a69-9c57-6b5f3f1c0000',
+        historyData: '7c3e3005-4e0a-4a69-9c57-6b5f3f1c0000',
+        erase: '7c3e3006-4e0a-4a69-9c57-6b5f3f1c0000'
+      };
+      const RECORD_SIZE = 44;
+      const HISTORY_PAGE_SIZE = 5;
+      const FIRST_CURSOR = 0xffffffff;
+      const MAX_TABLE_ROWS = 200;
+      const MAGIC = 0x4151;
+      const VERSION = 1;
+      const COMMIT = 0xc0de17ed;
+      const FLAG_UTC = 1;
+
+      const fields = [
+        { key: 'sht41Temperature', label: 'SHT41 temperature', unit: '°C', scale: 100, signed: true, width: 2, bit: 0 },
+        { key: 'sht41Humidity', label: 'SHT41 relative humidity', unit: '%', scale: 100, signed: false, width: 2, bit: 1 },
+        { key: 'scd41Co2', label: 'SCD41 CO₂', unit: 'ppm', scale: 1, signed: false, width: 2, bit: 2 },
+        { key: 'scd41Temperature', label: 'SCD41 temperature', unit: '°C', scale: 100, signed: true, width: 2, bit: 3 },
+        { key: 'scd41Humidity', label: 'SCD41 relative humidity', unit: '%', scale: 100, signed: false, width: 2, bit: 4 },
+        { key: 'bmp580Pressure', label: 'BMP580 pressure', unit: 'Pa', scale: 1, signed: false, width: 3, bit: 5 },
+        { key: 'bmp580Temperature', label: 'BMP580 temperature', unit: '°C', scale: 100, signed: true, width: 2, bit: 6 },
+        { key: 'sgp41Voc', label: 'SGP41 VOC index', unit: '', scale: 1, signed: false, width: 2, bit: 7 },
+        { key: 'sgp41Nox', label: 'SGP41 NOx index', unit: '', scale: 1, signed: false, width: 2, bit: 8 }
+      ];
+      const metrics = Object.fromEntries(fields.map(field => [field.key, field]));
+
+      const state = {
+        device: null,
+        server: null,
+        connected: false,
+        busy: false,
+        metadata: null,
+        records: [],
+        segments: [],
+        selectedMetric: 'scd41Co2',
+        selectedSegment: 'latest',
+        pendingPage: null,
+        metadataRefreshTimer: null,
+        chartPoints: [],
+        chartPlot: null
+      };
+      const characteristics = {};
+      const $ = id => document.getElementById(id);
+      const notice = $('notice');
+      const connectionPill = $('connection-pill');
+      const connectButton = $('connect-button');
+      const storageToggle = $('storage-toggle');
+      const syncClockButton = $('sync-clock');
+      const eraseButton = $('erase-history');
+      const retrieveButton = $('retrieve-button');
+      const clearButton = $('clear-button');
+      const exportButton = $('export-button');
+      const metricSelect = $('metric-select');
+      const segmentSelect = $('segment-select');
+      const canvas = $('history-chart');
+      const chartWrap = document.querySelector('.canvas-wrap');
+      const chartEmpty = $('chart-empty');
+      const tooltip = $('chart-tooltip');
+      const ctx = canvas.getContext('2d');
+
+      fields.forEach(field => {
+        const option = document.createElement('option');
+        option.value = field.key;
+        option.textContent = field.label;
+        metricSelect.appendChild(option);
+      });
+      metricSelect.value = state.selectedMetric;
+
+      function showNotice(message, tone = 'warning') {
+        notice.textContent = message;
+        notice.className = 'notice' + (message ? ' visible ' + tone : '');
+      }
+
+      function setConnectionState(status) {
+        connectionPill.className = 'connection-pill ' + status;
+        connectionPill.textContent = status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Connection error' : 'Disconnected';
+        connectButton.disabled = status === 'connecting' || state.busy;
+        connectButton.textContent = status === 'connected' ? 'Disconnect' : status === 'connecting' ? 'Connecting…' : 'Connect sensor';
+        updateControlState();
+      }
+
+      function updateControlState() {
+        const enabled = state.connected && !state.busy;
+        storageToggle.disabled = !enabled || !state.metadata;
+        syncClockButton.disabled = !enabled;
+        eraseButton.disabled = !enabled;
+        retrieveButton.disabled = !enabled || !characteristics.historyRequest;
+        clearButton.disabled = state.busy || state.records.length === 0;
+        exportButton.disabled = state.records.length === 0;
+        metricSelect.disabled = state.records.length === 0;
+        segmentSelect.disabled = state.segments.length === 0;
+      }
+
+      function formatNumber(value, digits = 0) {
+        return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(value);
+      }
+
+      function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return '—';
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60) return minutes + ' min';
+        const hours = Math.floor(minutes / 60);
+        if (hours < 48) return hours + ' h';
+        return formatNumber(hours / 24, 1) + ' d';
+      }
+
+      function formatUptime(seconds) {
+        if (!Number.isFinite(seconds)) return '—';
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (days) return 'up ' + days + 'd ' + hours + 'h';
+        if (hours) return 'up ' + hours + 'h ' + minutes + 'm';
+        return 'up ' + minutes + 'm';
+      }
+
+      function formatRecordTime(record, includeMode = false) {
+        const mode = record.utc ? 'UTC' : 'uptime';
+        const time = record.utc
+          ? new Date(record.timestamp * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+          : formatUptime(record.timestamp) + ' · boot ' + record.bootGeneration;
+        return includeMode ? time + ' · ' + mode : time;
+      }
+
+      function formatRangeTime(timestamp, utc) {
+        if (!timestamp) return '—';
+        return utc
+          ? new Date(timestamp * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+          : formatUptime(timestamp);
+      }
+
+      function byteArrayToHex(bytes) {
+        return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      }
+
+      function crc16(bytes) {
+        let crc = 0xffff;
+        for (const byte of bytes) {
+          crc ^= byte;
+          for (let i = 0; i < 8; i += 1) crc = crc & 1 ? (crc >>> 1) ^ 0xa001 : crc >>> 1;
+        }
+        return crc;
+      }
+
+      function payloadLengthForMask(mask) {
+        return fields.reduce((length, field) => length + ((mask & (1 << field.bit)) ? field.width : 0), 0);
+      }
+
+      function decodeRecord(bytes) {
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength !== RECORD_SIZE) throw new Error('History record has an invalid length');
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (view.getUint16(0, true) !== MAGIC || view.getUint8(2) !== VERSION || view.getUint32(40, true) !== COMMIT) throw new Error('History record header or commit marker is invalid');
+        if (crc16(bytes.slice(0, 38)) !== view.getUint16(38, true)) throw new Error('History record CRC is invalid');
+        const flags = view.getUint8(3);
+        const freshMask = view.getUint16(17, true);
+        if ((freshMask & ~0x1ff) !== 0) throw new Error('History record fresh mask is invalid');
+        if (((flags & 0x3e) >>> 1) !== payloadLengthForMask(freshMask)) throw new Error('History record payload length is invalid');
+
+        const values = {};
+        let cursor = 19;
+        fields.forEach(field => {
+          if ((freshMask & (1 << field.bit)) === 0) {
+            values[field.key] = null;
+            return;
+          }
+          let raw;
+          if (field.width === 3) raw = bytes[cursor] | (bytes[cursor + 1] << 8) | (bytes[cursor + 2] << 16);
+          else raw = field.signed ? view.getInt16(cursor, true) : view.getUint16(cursor, true);
+          values[field.key] = raw / field.scale;
+          cursor += field.width;
+        });
+        return {
+          sequence: view.getUint32(4, true),
+          bootGeneration: view.getUint32(8, true),
+          timestamp: view.getUint32(12, true),
+          utc: (flags & FLAG_UTC) !== 0,
+          status: view.getUint8(16),
+          freshMask,
+          values
+        };
+      }
+
+      function parseMetadata(view) {
+        if (view.byteLength < 24) throw new Error('Storage metadata has an invalid length');
+        return {
+          enabled: view.getUint8(0) !== 0,
+          clockSynchronized: view.getUint8(1) !== 0,
+          recordCount: view.getUint32(2, true),
+          oldestSequence: view.getUint32(6, true),
+          newestSequence: view.getUint32(10, true),
+          oldestUtc: view.getUint8(14) !== 0,
+          newestUtc: view.getUint8(15) !== 0,
+          oldestTimestamp: view.getUint32(16, true),
+          newestTimestamp: view.getUint32(20, true)
+        };
+      }
+
+      function parseHistoryPage(view) {
+        if (view.byteLength < 5) throw new Error('History response is too short');
+        const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+        const nextCursor = view.getUint32(0, true);
+        const count = view.getUint8(4);
+        if (count > HISTORY_PAGE_SIZE) throw new Error('History response contains too many records');
+        const records = [];
+        let offset = 5;
+        for (let index = 0; index < count; index += 1) {
+          const length = bytes[offset];
+          offset += 1;
+          if (length !== RECORD_SIZE || offset + length > bytes.length) throw new Error('History response contains an invalid record length');
+          records.push(decodeRecord(bytes.slice(offset, offset + length)));
+          offset += length;
+        }
+        return { nextCursor, count, records };
+      }
+
+      function writeUint32(value) {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        return bytes;
+      }
+
+      function writeHistoryRequest(cursor) {
+        const bytes = new Uint8Array(6);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, cursor >>> 0, true);
+        view.setUint16(4, HISTORY_PAGE_SIZE, true);
+        return bytes;
+      }
+
+      function wait(milliseconds) {
+        return new Promise(resolve => setTimeout(resolve, milliseconds));
+      }
+
+      async function writeCharacteristic(characteristic, bytes) {
+        if (characteristic.writeValueWithResponse) return characteristic.writeValueWithResponse(bytes);
+        if (characteristic.writeValue) return characteristic.writeValue(bytes);
+        return characteristic.writeValueWithoutResponse(bytes);
+      }
+
+      async function connect() {
+        if (!navigator.bluetooth) {
+          setConnectionState('error');
+          showNotice('Web Bluetooth is not available in this browser. Open this page in Chrome or a compatible browser over localhost.');
+          return;
+        }
+        setConnectionState('connecting');
+        showNotice('');
+        try {
+          state.device = await navigator.bluetooth.requestDevice({ filters: [{ name: DEVICE_NAME }], optionalServices: [STORAGE_SERVICE_UUID] });
+          state.device.addEventListener('gattserverdisconnected', handleDisconnected);
+          state.server = await state.device.gatt.connect();
+          const service = await state.server.getPrimaryService(STORAGE_SERVICE_UUID);
+          for (const [name, uuid] of Object.entries(UUID)) characteristics[name] = await service.getCharacteristic(uuid);
+          characteristics.historyData.addEventListener('characteristicvaluechanged', handleHistoryNotification);
+          await characteristics.historyData.startNotifications();
+          state.connected = true;
+          setConnectionState('connected');
+          // Metadata is read-only (the firmware does not notify it). The
+          // firmware populates it after waiting for the first sensor update,
+          // so retry twice if the initial read still contains the default zeroes.
+          await refreshMetadata(2);
+          startMetadataRefresh();
+        } catch (error) {
+          stopMetadataRefresh();
+          state.connected = false;
+          state.server = null;
+          Object.keys(characteristics).forEach(key => delete characteristics[key]);
+          setConnectionState('error');
+          if (error.name === 'NotFoundError') showNotice('No AirQuality sensor was selected.');
+          else if (error.name === 'SecurityError') showNotice('Bluetooth access was blocked. Check browser permissions and make sure this page runs from localhost.');
+          else showNotice('Could not connect to the history service: ' + (error.message || error.name));
+          console.error(error);
+        }
+      }
+
+      function handleDisconnected() {
+        stopMetadataRefresh();
+        if (state.pendingPage) {
+          state.pendingPage.reject(new Error('The sensor disconnected during history retrieval'));
+          state.pendingPage = null;
+        }
+        state.connected = false;
+        state.server = null;
+        Object.keys(characteristics).forEach(key => delete characteristics[key]);
+        setConnectionState('disconnected');
+        showNotice('The sensor disconnected. Retrieved local data is still available for viewing and export.');
+      }
+
+      function disconnect() {
+        if (state.device && state.device.gatt && state.device.gatt.connected) state.device.gatt.disconnect();
+        else handleDisconnected();
+      }
+
+      function startMetadataRefresh() {
+        stopMetadataRefresh();
+        state.metadataRefreshTimer = setInterval(() => {
+          if (!state.connected || state.busy) return;
+          refreshMetadata().catch(error => console.warn('Could not refresh storage metadata', error));
+        }, 60000);
+      }
+
+      function stopMetadataRefresh() {
+        if (state.metadataRefreshTimer !== null) {
+          clearInterval(state.metadataRefreshTimer);
+          state.metadataRefreshTimer = null;
+        }
+      }
+
+      async function refreshMetadata(retries = 0) {
+        if (!characteristics.metadata) return;
+        state.metadata = parseMetadata(await characteristics.metadata.readValue());
+        renderMetadata();
+        updateControlState();
+        if (retries > 0 && state.metadata.recordCount === 0) {
+          await wait(500);
+          return refreshMetadata(retries - 1);
+        }
+      }
+
+      function renderMetadata() {
+        const metadata = state.metadata;
+        if (!metadata) {
+          $('storage-enabled').textContent = '—';
+          $('storage-enabled').className = 'health-badge offline';
+          $('clock-status').textContent = '—';
+          $('clock-status').className = 'health-badge offline';
+          $('record-count').textContent = '—';
+          $('coverage').textContent = '—';
+          $('oldest-time').textContent = '—';
+          $('newest-time').textContent = '—';
+          $('oldest-detail').textContent = '—';
+          $('newest-detail').textContent = '—';
+          storageToggle.textContent = 'Enable storage';
+          return;
+        }
+        $('storage-enabled').textContent = metadata.enabled ? 'Enabled' : 'Disabled';
+        $('storage-enabled').className = 'health-badge ' + (metadata.enabled ? 'good' : 'stale');
+        $('clock-status').textContent = metadata.clockSynchronized ? 'Synchronized' : 'Needs sync';
+        $('clock-status').className = 'health-badge ' + (metadata.clockSynchronized ? 'good' : 'stale');
+        $('clock-detail').textContent = metadata.clockSynchronized ? 'New records use UTC' : 'New records use uptime';
+        $('record-count').textContent = formatNumber(metadata.recordCount);
+        const sameDomain = metadata.oldestUtc === metadata.newestUtc && metadata.newestTimestamp >= metadata.oldestTimestamp;
+        $('coverage').textContent = metadata.recordCount < 2 ? '—' : sameDomain ? formatDuration(metadata.newestTimestamp - metadata.oldestTimestamp) : 'Mixed';
+        $('oldest-time').textContent = metadata.recordCount ? formatRangeTime(metadata.oldestTimestamp, metadata.oldestUtc) : '—';
+        $('newest-time').textContent = metadata.recordCount ? formatRangeTime(metadata.newestTimestamp, metadata.newestUtc) : '—';
+        $('oldest-detail').textContent = metadata.recordCount ? (metadata.oldestUtc ? 'UTC' : 'uptime') + ' · seq ' + metadata.oldestSequence : '—';
+        $('newest-detail').textContent = metadata.recordCount ? (metadata.newestUtc ? 'UTC' : 'uptime') + ' · seq ' + metadata.newestSequence : '—';
+        storageToggle.textContent = metadata.enabled ? 'Disable storage' : 'Enable storage';
+      }
+
+      function setBusy(busy) {
+        state.busy = busy;
+        updateControlState();
+        connectButton.disabled = busy || !state.connected;
+      }
+
+      async function toggleStorage() {
+        if (!state.metadata) return;
+        setBusy(true);
+        try {
+          await writeCharacteristic(characteristics.control, new Uint8Array([state.metadata.enabled ? 0 : 1]));
+          await refreshMetadata();
+        } catch (error) {
+          showNotice('Could not change storage state: ' + (error.message || error.name));
+        } finally { setBusy(false); }
+      }
+
+      async function syncClock() {
+        setBusy(true);
+        try {
+          const unixSeconds = Math.floor(Date.now() / 1000);
+          await writeCharacteristic(characteristics.clockSync, writeUint32(unixSeconds));
+          await refreshMetadata();
+        } catch (error) {
+          showNotice('Could not synchronize the board clock: ' + (error.message || error.name));
+        } finally { setBusy(false); }
+      }
+
+      async function eraseHistory() {
+        if (!window.confirm('Erase all stored history from the board? This cannot be undone.')) return;
+        setBusy(true);
+        try {
+          await writeCharacteristic(characteristics.erase, new TextEncoder().encode('ERASE'));
+          state.records = [];
+          rebuildSegments();
+          await refreshMetadata();
+          renderHistory();
+          showNotice('Stored history erased.', 'success');
+        } catch (error) {
+          showNotice('Could not erase stored history: ' + (error.message || error.name));
+        } finally { setBusy(false); }
+      }
+
+      function handleHistoryNotification(event) {
+        if (!state.pendingPage) return;
+        const pending = state.pendingPage;
+        state.pendingPage = null;
+        clearTimeout(pending.timeout);
+        try { pending.resolve(parseHistoryPage(event.target.value)); }
+        catch (error) { pending.reject(error); }
+      }
+
+      function requestPage(cursor) {
+        return new Promise(async (resolve, reject) => {
+          const timeout = setTimeout(() => {
+            if (state.pendingPage && state.pendingPage.resolve === resolve) {
+              state.pendingPage = null;
+              reject(new Error('Timed out waiting for a history page'));
+            }
+          }, 10000);
+          state.pendingPage = { resolve, reject, timeout };
+          try { await writeCharacteristic(characteristics.historyRequest, writeHistoryRequest(cursor)); }
+          catch (error) {
+            clearTimeout(timeout);
+            if (state.pendingPage && state.pendingPage.resolve === resolve) state.pendingPage = null;
+            reject(error);
+          }
+        });
+      }
+
+      async function retrieveHistory() {
+        if (!state.connected || !characteristics.historyRequest || state.busy) return;
+        setBusy(true);
+        state.records = [];
+        rebuildSegments();
+        renderHistory();
+        $('progress-wrap').classList.add('visible');
+        $('progress-label').textContent = 'Requesting history…';
+        $('progress-count').textContent = '0 records';
+        $('retrieval-progress').value = 0;
+        $('retrieval-progress').max = Math.max(1, state.metadata ? state.metadata.recordCount : 1);
+        try {
+          let cursor = FIRST_CURSOR;
+          const seen = new Set();
+          let pageNumber = 0;
+          while (true) {
+            pageNumber += 1;
+            $('progress-label').textContent = 'Retrieving page ' + pageNumber + '…';
+            const page = await requestPage(cursor);
+            page.records.forEach(record => {
+              if (!seen.has(record.sequence)) {
+                seen.add(record.sequence);
+                state.records.push(record);
+              }
+            });
+            state.records.sort((a, b) => a.sequence - b.sequence);
+            $('progress-count').textContent = formatNumber(state.records.length) + ' records';
+            $('retrieval-progress').value = Math.min(state.records.length, $('retrieval-progress').max);
+            if (page.count === 0 || page.nextCursor === 0) break;
+            if (page.nextCursor === cursor) throw new Error('History cursor did not advance');
+            cursor = page.nextCursor;
+          }
+          rebuildSegments();
+          try { await refreshMetadata(); }
+          catch (error) { console.warn('Could not refresh storage metadata after retrieval', error); }
+          renderHistory();
+          $('progress-label').textContent = 'Retrieval complete';
+          $('progress-count').textContent = formatNumber(state.records.length) + ' records';
+          $('retrieval-progress').value = state.records.length || 0;
+          showNotice('Retrieved ' + formatNumber(state.records.length) + ' historical records.', 'success');
+        } catch (error) {
+          rebuildSegments();
+          renderHistory();
+          showNotice('History retrieval stopped: ' + (error.message || error.name));
+        } finally { setBusy(false); }
+      }
+
+      function rebuildSegments() {
+        const segments = [];
+        state.records.forEach(record => {
+          const previous = segments.length ? segments[segments.length - 1].records.at(-1) : null;
+          const startsNew = !previous || previous.bootGeneration !== record.bootGeneration || previous.utc !== record.utc || record.sequence !== previous.sequence + 1;
+          if (startsNew) segments.push({ records: [], bootGeneration: record.bootGeneration, utc: record.utc });
+          segments.at(-1).records.push(record);
+        });
+        state.segments = segments;
+        if (state.selectedSegment !== 'latest' && Number(state.selectedSegment) >= segments.length) state.selectedSegment = 'latest';
+        renderSegmentOptions();
+      }
+
+      function renderSegmentOptions() {
+        const previous = segmentSelect.value || state.selectedSegment;
+        segmentSelect.replaceChildren();
+        const latest = document.createElement('option');
+        latest.value = 'latest';
+        latest.textContent = 'Newest time segment';
+        segmentSelect.appendChild(latest);
+        state.segments.forEach((segment, index) => {
+          const option = document.createElement('option');
+          const first = segment.records[0];
+          const last = segment.records.at(-1);
+          option.value = String(index);
+          option.textContent = 'Segment ' + (index + 1) + ' · ' + (segment.utc ? 'UTC' : 'uptime') + ' · boot ' + segment.bootGeneration + ' · ' + formatRangeTime(first.timestamp, segment.utc) + '–' + formatRangeTime(last.timestamp, segment.utc);
+          segmentSelect.appendChild(option);
+        });
+        if (previous === 'latest' || (Number(previous) >= 0 && Number(previous) < state.segments.length)) state.selectedSegment = previous;
+        segmentSelect.value = state.selectedSegment;
+      }
+
+      function selectedSegment() {
+        if (!state.segments.length) return null;
+        return state.selectedSegment === 'latest' ? state.segments.at(-1) : state.segments[Number(state.selectedSegment)] || state.segments.at(-1);
+      }
+
+      function renderHistory() {
+        renderSegmentOptions();
+        renderTable();
+        updateControlState();
+        drawChart();
+      }
+
+      function fieldValue(record, field) {
+        return record && record.values[field.key] !== null ? record.values[field.key] : null;
+      }
+
+      function displayMetricValue(value, field) {
+        if (value === null || value === undefined) return '—';
+        const digits = field.scale === 100 ? 2 : 0;
+        return formatNumber(value, digits) + (field.unit ? ' ' + field.unit : '');
+      }
+
+      function renderTable() {
+        const tbody = $('record-table');
+        tbody.replaceChildren();
+        const rows = state.records.slice(-MAX_TABLE_ROWS).reverse();
+        rows.forEach(record => {
+          const tr = document.createElement('tr');
+          const values = [
+            formatRecordTime(record),
+            String(record.sequence),
+            record.utc ? 'UTC' : 'Uptime',
+            displayMetricValue(record.values.scd41Co2, metrics.scd41Co2),
+            displayMetricValue(record.values.sht41Temperature, metrics.sht41Temperature),
+            displayMetricValue(record.values.sht41Humidity, metrics.sht41Humidity),
+            displayMetricValue(record.values.sgp41Voc, metrics.sgp41Voc),
+            displayMetricValue(record.values.sgp41Nox, metrics.sgp41Nox)
+          ];
+          values.forEach((value, index) => {
+            const td = document.createElement('td');
+            td.textContent = value;
+            if (value === '—') td.className = 'missing';
+            if (index === 0) td.title = 'Boot generation ' + record.bootGeneration + ', status 0x' + record.status.toString(16).padStart(2, '0');
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        $('table-summary').textContent = state.records.length ? formatNumber(state.records.length) + ' records loaded' : 'No records loaded.';
+        $('table-limit').textContent = state.records.length > MAX_TABLE_ROWS ? 'Showing latest ' + MAX_TABLE_ROWS : '';
+        $('graph-summary').textContent = state.records.length ? formatNumber(state.records.length) + ' records · ' + state.segments.length + ' time segment' + (state.segments.length === 1 ? '' : 's') : 'Retrieve data to populate the graph.';
+      }
+
+      function canvasSize() {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.round(rect.width * dpr));
+        canvas.height = Math.max(1, Math.round(rect.height * dpr));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        return { width: rect.width, height: rect.height };
+      }
+
+      function drawChart() {
+        const size = canvasSize();
+        ctx.clearRect(0, 0, size.width, size.height);
+        state.chartPoints = [];
+        state.chartPlot = null;
+        const segment = selectedSegment();
+        const field = metrics[state.selectedMetric];
+        if (!segment || !field) {
+          chartEmpty.style.display = 'grid';
+          chartEmpty.textContent = 'No history loaded yet.';
+          return;
+        }
+        const valid = segment.records.filter(record => fieldValue(record, field) !== null);
+        if (!valid.length) {
+          chartEmpty.style.display = 'grid';
+          chartEmpty.textContent = 'This metric has no fresh values in the selected time segment.';
+          return;
+        }
+        chartEmpty.style.display = 'none';
+        const margin = { left: 62, right: 22, top: 22, bottom: 48 };
+        const plot = { x: margin.left, y: margin.top, width: Math.max(10, size.width - margin.left - margin.right), height: Math.max(10, size.height - margin.top - margin.bottom) };
+        state.chartPlot = plot;
+        const timestamps = segment.records.map(record => record.timestamp);
+        let minX = Math.min(...timestamps);
+        let maxX = Math.max(...timestamps);
+        if (minX === maxX) maxX = minX + 60;
+        const values = valid.map(record => fieldValue(record, field));
+        let minY = Math.min(...values);
+        let maxY = Math.max(...values);
+        if (minY === maxY) { minY -= 1; maxY += 1; }
+        const padding = (maxY - minY) * 0.08;
+        minY -= padding;
+        maxY += padding;
+        const xFor = timestamp => plot.x + ((timestamp - minX) / (maxX - minX)) * plot.width;
+        const yFor = value => plot.y + plot.height - ((value - minY) / (maxY - minY)) * plot.height;
+
+        ctx.strokeStyle = 'rgba(178, 204, 238, 0.12)';
+        ctx.fillStyle = '#9db0c8';
+        ctx.font = '12px system-ui, sans-serif';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i += 1) {
+          const y = plot.y + plot.height * i / 4;
+          ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.width, y); ctx.stroke();
+          const label = formatNumber(maxY - (maxY - minY) * i / 4, field.scale === 100 ? 1 : 0);
+          ctx.fillText(label, 7, y + 4);
+        }
+        ctx.strokeStyle = 'rgba(178, 204, 238, 0.28)';
+        ctx.beginPath(); ctx.moveTo(plot.x, plot.y); ctx.lineTo(plot.x, plot.y + plot.height); ctx.lineTo(plot.x + plot.width, plot.y + plot.height); ctx.stroke();
+        ctx.fillStyle = '#9db0c8';
+        ctx.fillText(formatRecordTime(segment.records[0]), plot.x, size.height - 15);
+        const lastLabel = formatRecordTime(segment.records.at(-1));
+        ctx.textAlign = 'right'; ctx.fillText(lastLabel, plot.x + plot.width, size.height - 15); ctx.textAlign = 'left';
+
+        ctx.strokeStyle = '#5de1da';
+        ctx.fillStyle = '#5de1da';
+        ctx.lineWidth = 2;
+        let drawing = false;
+        segment.records.forEach(record => {
+          const value = fieldValue(record, field);
+          if (value === null) { drawing = false; return; }
+          const x = xFor(record.timestamp);
+          const y = yFor(value);
+          state.chartPoints.push({ x, y, record, value });
+          if (!drawing) { ctx.beginPath(); ctx.moveTo(x, y); drawing = true; }
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        if (state.chartPoints.length <= 500) state.chartPoints.forEach(point => { ctx.beginPath(); ctx.arc(point.x, point.y, 2.5, 0, Math.PI * 2); ctx.fill(); });
+        $('chart-legend').textContent = field.label + (field.unit ? ' · ' + field.unit : '') + ' · ' + (segment.utc ? 'UTC wall-clock time' : 'uptime for boot ' + segment.bootGeneration) + ' · missing values create gaps.';
+      }
+
+      function showTooltip(event) {
+        if (!state.chartPoints.length) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        let nearest = null;
+        let distance = Infinity;
+        state.chartPoints.forEach(point => {
+          const d = Math.hypot(point.x - x, point.y - y);
+          if (d < distance) { distance = d; nearest = point; }
+        });
+        if (!nearest || distance > 28) { tooltip.style.display = 'none'; return; }
+        const field = metrics[state.selectedMetric];
+        tooltip.innerHTML = '<strong>' + field.label + '</strong><br>' + displayMetricValue(nearest.value, field) + '<br>' + formatRecordTime(nearest.record, true) + '<br>Sequence ' + nearest.record.sequence;
+        tooltip.style.display = 'block';
+        tooltip.style.left = Math.min(Math.max(8, nearest.x + 12), rect.width - tooltip.offsetWidth - 8) + 'px';
+        tooltip.style.top = Math.max(8, nearest.y - tooltip.offsetHeight - 10) + 'px';
+      }
+
+      function csvEscape(value) {
+        const text = value === null || value === undefined ? '' : String(value);
+        return /[",\n]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
+      }
+
+      function exportCsv() {
+        if (!state.records.length) return;
+        const headers = ['sequence', 'boot_generation', 'timestamp', 'timestamp_mode', 'display_time', 'status_hex', 'fresh_mask_hex', ...fields.map(field => field.key)];
+        const lines = [headers.map(csvEscape).join(',')];
+        state.records.forEach(record => {
+          const row = [record.sequence, record.bootGeneration, record.timestamp, record.utc ? 'utc' : 'uptime', formatRecordTime(record), '0x' + record.status.toString(16).padStart(2, '0'), '0x' + record.freshMask.toString(16).padStart(3, '0')];
+          fields.forEach(field => row.push(fieldValue(record, field)));
+          lines.push(row.map(csvEscape).join(','));
+        });
+        const blob = new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = 'air-quality-history-' + new Date().toISOString().slice(0, 10) + '.csv';
+        anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showNotice('Exported ' + formatNumber(state.records.length) + ' records as CSV.', 'info');
+      }
+
+      function clearLocalData() {
+        if (!window.confirm('Clear the history retrieved into this page? This does not erase data on the board.')) return;
+        state.records = [];
+        rebuildSegments();
+        renderHistory();
+        showNotice('Local history cleared. Board storage was not changed.', 'info');
+      }
+
+      function initialize() {
+        storageToggle.addEventListener('click', toggleStorage);
+        syncClockButton.addEventListener('click', syncClock);
+        eraseButton.addEventListener('click', eraseHistory);
+        retrieveButton.addEventListener('click', retrieveHistory);
+        clearButton.addEventListener('click', clearLocalData);
+        exportButton.addEventListener('click', exportCsv);
+        connectButton.addEventListener('click', () => state.connected ? disconnect() : connect());
+        metricSelect.addEventListener('change', () => { state.selectedMetric = metricSelect.value; drawChart(); });
+        segmentSelect.addEventListener('change', () => { state.selectedSegment = segmentSelect.value; drawChart(); });
+        canvas.addEventListener('mousemove', showTooltip);
+        canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+        window.addEventListener('resize', drawChart);
+        renderMetadata();
+        renderHistory();
+        setConnectionState('disconnected');
+      }
+
+      initialize();
+    })();
+  </script>
+</body>
+</html>
