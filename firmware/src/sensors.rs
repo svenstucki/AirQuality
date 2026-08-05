@@ -8,6 +8,11 @@ const SHT41: u8 = 0x44;
 const SGP41: u8 = 0x59;
 const SCD41: u8 = 0x62;
 const BMP580: u8 = 0x47;
+const BMP580_OSR_CONFIG: u8 = 0x36;
+const BMP580_ODR_CONFIG: u8 = 0x37;
+const BMP580_INT_SOURCE: u8 = 0x15;
+const BMP580_OSR_EFFECTIVE: u8 = 0x38;
+const BMP580_INT_STATUS: u8 = 0x27;
 
 #[derive(Clone, Copy, Default)]
 pub struct SensorSnapshot {
@@ -113,14 +118,18 @@ pub async fn run<I2C>(
             bmp_initialized = bmp580_init(&mut i2c).await;
         }
         if bmp_initialized {
-            if let Some(measurement) = bmp580_measure(&mut i2c).await {
-                snapshot.bmp580_pressure_pa = measurement.0;
-                snapshot.bmp580_temperature_centi_c = measurement.1;
-                snapshot.status |= BMP580_OK;
-                fresh_mask |= (1 << 5) | (1 << 6);
-            } else {
-                snapshot.status &= !BMP580_OK;
-                warn!("BMP580 read failed");
+            match bmp580_measure(&mut i2c).await {
+                Ok(Some(measurement)) => {
+                    snapshot.bmp580_pressure_pa = measurement.0;
+                    snapshot.bmp580_temperature_centi_c = measurement.1;
+                    snapshot.status |= BMP580_OK;
+                    fresh_mask |= (1 << 5) | (1 << 6);
+                }
+                Ok(None) => {}
+                Err(()) => {
+                    snapshot.status &= !BMP580_OK;
+                    warn!("BMP580 read failed");
+                }
             }
         }
 
@@ -350,21 +359,71 @@ where
         warn!("BMP580 unexpected chip id");
         return false;
     }
-    if write(i2c, BMP580, &[0x37, 0x03]).await.is_err() {
+    // Stop an existing measurement loop before changing OSR/ODR. The sensor
+    // may still be running after an ESP reset, and Bosch specifies that these
+    // settings must not be changed during an active conversion.
+    if write(i2c, BMP580, &[BMP580_ODR_CONFIG, 0x80])
+        .await
+        .is_err()
+    {
         return false;
     }
-    Timer::after(Duration::from_millis(10)).await;
-    info!("BMP580 initialized");
+    Timer::after(Duration::from_millis(3)).await;
+
+    // Enable pressure and temperature measurements at 1 Hz. Pressure enable
+    // is bit 6 of OSR_CONFIG; both oversampling factors remain at 1x.
+    if write(i2c, BMP580, &[BMP580_OSR_CONFIG, 0x40])
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    // ODR=1 Hz is 0x1c in bits 6:2; power mode NORMAL is 0b01.
+    if write(i2c, BMP580, &[BMP580_ODR_CONFIG, 0x71])
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    Timer::after(Duration::from_millis(4)).await;
+
+    let mut effective_osr = [0; 1];
+    if write_read(i2c, BMP580, &[BMP580_OSR_EFFECTIVE], &mut effective_osr)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    if effective_osr[0] & 0x80 == 0 {
+        warn!("BMP580 rejected OSR/ODR configuration");
+        return false;
+    }
+
+    // Enable the internal data-ready status source. No external interrupt
+    // pin is required; the status bit is useful for diagnostics and future
+    // polling changes.
+    if write(i2c, BMP580, &[BMP580_INT_SOURCE, 0x01])
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    info!("BMP580 initialized; effective_osr={}", effective_osr[0]);
     true
 }
 
-async fn bmp580_measure<I2C>(i2c: &mut I2C) -> Option<(u32, i16)>
+async fn bmp580_measure<I2C>(i2c: &mut I2C) -> Result<Option<(u32, i16)>, ()>
 where
     I2C: I2c,
 {
+    let mut interrupt_status = [0; 1];
+    write_read(i2c, BMP580, &[BMP580_INT_STATUS], &mut interrupt_status).await?;
+    if interrupt_status[0] & 0x01 == 0 {
+        return Ok(None);
+    }
     let mut data = [0; 6];
-    write_read(i2c, BMP580, &[0x1d], &mut data).await.ok()?;
-    Some(decode_bmp580(data))
+    write_read(i2c, BMP580, &[0x1d], &mut data).await?;
+    Ok(Some(decode_bmp580(data)))
 }
 
 fn decode_sht41_temperature_humidity(temperature_raw: u16, humidity_raw: u16) -> (i16, u16) {
@@ -389,8 +448,16 @@ fn decode_bmp580(data: [u8; 6]) -> (u32, i16) {
         data[2],
         if data[2] & 0x80 != 0 { 0xff } else { 0 },
     ]);
-    let pressure_raw = u32::from_le_bytes([data[3], data[4], data[5], 0]);
-    (pressure_raw / 64, (temperature_raw * 100 / 65_536) as i16)
+    let pressure_raw = i32::from_le_bytes([
+        data[3],
+        data[4],
+        data[5],
+        if data[5] & 0x80 != 0 { 0xff } else { 0 },
+    ]);
+    (
+        pressure_raw.max(0) as u32 / 64,
+        (temperature_raw * 100 / 65_536) as i16,
+    )
 }
 
 async fn read<I2C>(i2c: &mut I2C, address: u8, buffer: &mut [u8]) -> Result<(), ()>
