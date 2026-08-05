@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "AirQuality_Modules") (type "KiCad") (uri "${KIPRJMOD}/AirQuality.pretty") (options "") (descr "Project footprints for AirQuality module placeholders"))
+)

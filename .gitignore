@@ -1,3 +1,8 @@
-/target/
-Embed.local.toml
-.embed.local.toml
+# macOS
+.DS_Store
+*.DS_Store*
+
+# Firmware build output and local probe-rs configuration
+/firmware/target/
+/firmware/Embed.local.toml
+/firmware/.embed.local.toml

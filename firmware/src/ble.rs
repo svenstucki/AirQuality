@@ -164,6 +164,15 @@ async fn handle_connection<C>(
         match select(conn.next(), notify_updates(&conn, server, updates)).await {
             Either::First(GattConnectionEvent::Disconnected { .. }) => break,
             Either::First(GattConnectionEvent::Gatt { event }) => match event {
+                GattEvent::Read(read) if read.handle() == server.storage.metadata.handle() => {
+                    // Metadata is derived from the storage ring, which can change while
+                    // a connection is active. Refresh the characteristic before replying
+                    // so clients polling it receive current record counts and timestamps.
+                    refresh_metadata(server, storage_commands, storage_responses).await;
+                    if let Ok(reply) = read.accept() {
+                        reply.send().await;
+                    }
+                }
                 GattEvent::Write(write) if write.handle() == server.rgb_led.color.handle => {
                     let data = write.data();
                     let mut applied_color = None;
