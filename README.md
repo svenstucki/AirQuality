@@ -61,6 +61,10 @@ The device advertises as `AirQuality`. Sensor characteristics are readable and
 support notifications. Values use little-endian fixed-point encodings so they
 can be consumed without floating-point support on a client.
 
+Both humidity characteristics report relative humidity in %RH × 100. The
+firmware applies the SHT41 and SCD41 transfer functions separately; neither is
+an absolute-humidity value.
+
 ### Air-quality service
 
 Service UUID:

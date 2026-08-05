@@ -182,7 +182,7 @@ where
         warn!("SHT41 CRC error");
         return None;
     }
-    Some(decode_sensirion_temperature_humidity(
+    Some(decode_sht41_temperature_humidity(
         u16::from_be_bytes([data[0], data[1]]),
         u16::from_be_bytes([data[3], data[4]]),
     ))
@@ -309,7 +309,7 @@ where
         return None;
     }
     let co2 = u16::from_be_bytes([data[0], data[1]]);
-    let (temperature, humidity) = decode_sensirion_temperature_humidity(
+    let (temperature, humidity) = decode_scd41_temperature_humidity(
         u16::from_be_bytes([data[3], data[4]]),
         u16::from_be_bytes([data[6], data[7]]),
     );
@@ -348,10 +348,17 @@ where
     Some(decode_bmp580(data))
 }
 
-fn decode_sensirion_temperature_humidity(temperature_raw: u16, humidity_raw: u16) -> (i16, u16) {
+fn decode_sht41_temperature_humidity(temperature_raw: u16, humidity_raw: u16) -> (i16, u16) {
     let temperature = -4_500i32 + (17_500i32 * temperature_raw as i32) / 65_535;
-    let humidity = -6_000i32 + (12_500i32 * humidity_raw as i32) / 65_535;
+    // SHT4x RH is -6 + 125 * raw / 65535 %RH, represented here as centi-%RH.
+    let humidity = -600i32 + (12_500i32 * humidity_raw as i32) / 65_535;
     (temperature as i16, humidity.clamp(0, 10_000) as u16)
+}
+
+fn decode_scd41_temperature_humidity(temperature_raw: u16, humidity_raw: u16) -> (i16, u16) {
+    let temperature = -4_500i32 + (17_500i32 * temperature_raw as i32) / 65_535;
+    let humidity = (10_000i32 * humidity_raw as i32) / 65_535;
+    (temperature as i16, humidity as u16)
 }
 
 fn decode_bmp580(data: [u8; 6]) -> (u32, i16) {
@@ -397,7 +404,9 @@ fn crc8(bytes: &[u8]) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc8, decode_bmp580, decode_sensirion_temperature_humidity};
+    use super::{
+        crc8, decode_bmp580, decode_scd41_temperature_humidity, decode_sht41_temperature_humidity,
+    };
 
     #[test]
     fn sensirion_crc_matches_reference() {
@@ -405,12 +414,23 @@ mod tests {
     }
 
     #[test]
-    fn sensirion_fixed_point_conversion_is_scaled_and_clamped() {
-        assert_eq!(decode_sensirion_temperature_humidity(0, 0), (-4_500, 0));
+    fn sht41_fixed_point_conversion_is_scaled_and_clamped() {
+        assert_eq!(decode_sht41_temperature_humidity(0, 0), (-4_500, 0));
+        assert_eq!(decode_sht41_temperature_humidity(0, 34_603).1, 6_000);
         assert_eq!(
-            decode_sensirion_temperature_humidity(u16::MAX, u16::MAX),
+            decode_sht41_temperature_humidity(u16::MAX, u16::MAX),
             (13_000, 10_000)
         );
+    }
+
+    #[test]
+    fn scd41_humidity_uses_percent_not_sht41_transfer_function() {
+        assert_eq!(decode_scd41_temperature_humidity(0, 0), (-4_500, 0));
+        assert_eq!(
+            decode_scd41_temperature_humidity(u16::MAX, u16::MAX),
+            (13_000, 10_000)
+        );
+        assert_eq!(decode_scd41_temperature_humidity(0, 39_321).1, 6_000);
     }
 
     #[test]
