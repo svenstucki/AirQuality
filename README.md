@@ -55,6 +55,15 @@ The installed `cargo-embed` binary must be able to load `libusb` on macOS. If
 it reports a missing `libusb-1.0.0.dylib`, repair the local probe-rs/libusb
 installation before flashing.
 
+The flash layout guard is part of the debug link and fails the build if the
+firmware image grows into the persistent-storage start address. The compact
+record codec can be tested on the host without selecting the embedded target:
+
+```text
+rustc --edition=2024 --test src/storage_format.rs -o /tmp/air-quality-storage-format-tests
+/tmp/air-quality-storage-format-tests
+```
+
 ## BLE GATT service
 
 The device advertises as `AirQuality`. Sensor characteristics are readable and
@@ -110,6 +119,75 @@ Its payload is exactly three bytes `[R, G, B]`. `[0, 0, 0]` turns the LED off.
 The firmware converts this logical RGB order to the WS2818B's wire order
 (GRB). Brightness is not a separate field; clients can scale the three color
 bytes before writing them.
+
+### Persistent sensor history service
+
+The firmware includes an optional persistent history service. It is disabled
+by default, and the enabled/disabled setting survives a reboot. Disabling it
+does not delete existing records; deletion requires the explicit erase command.
+The service UUID is:
+
+```text
+7c3e3000-4e0a-4a69-9c57-6b5f3f1c0000
+```
+
+| Characteristic | UUID suffix | Properties | Payload |
+| --- | --- | --- | --- |
+| Storage control | `3001` | Read, Write | Exactly one byte: `0` disabled, `1` enabled |
+| UTC clock sync | `3002` | Write | Little-endian `u32` Unix seconds |
+| Storage metadata | `3003` | Read | 24-byte little-endian structure described below |
+| History request | `3004` | Write | Cursor `u32` LE followed by maximum count `u16` LE |
+| History data | `3005` | Read, Notify | Chunk structure described below |
+| Erase history | `3006` | Write | Exactly the five ASCII bytes `ERASE` |
+
+The full characteristic UUID is formed by inserting the suffix into the
+service namespace, for example `7c3e3001-4e0a-4a69-9c57-6b5f3f1c0000` for
+storage control.
+
+The metadata payload is:
+
+```text
+byte  0       enabled (0/1)
+byte  1       clock synchronized (0/1)
+bytes 2..5   record count, u32 LE
+bytes 6..9   oldest sequence, u32 LE
+bytes 10..13 newest sequence, u32 LE
+byte  14      oldest timestamp is UTC (0/1)
+byte  15      newest timestamp is UTC (0/1)
+bytes 16..19 oldest timestamp, u32 LE
+bytes 20..23 newest timestamp, u32 LE
+```
+
+To retrieve history, write a six-byte request. Use cursor `0xffffffff` to
+start at the oldest available record; otherwise the cursor is the first
+sequence number to return. The implementation returns at most five records
+per chunk so it remains within the current 251-byte packet pool. The history
+data payload starts with a four-byte next cursor and one-byte record count,
+followed by `count` entries. Each entry is one length byte (currently `44`)
+and one serialized record. A zero next cursor means that no record was
+returned. Clients can request the returned next cursor to resume retrieval.
+
+Each serialized record is little-endian and contains a format/version marker,
+flags, sequence, boot generation, timestamp, sensor status, fresh-value mask,
+packed values, CRC16, and a final commit marker. The timestamp is Unix UTC
+seconds when the clock-synchronized flag is set; otherwise it is monotonic
+uptime seconds for the persisted boot generation. The nine packed fields are,
+in order: SHT41 temperature, SHT41 relative humidity, SCD41 CO₂, SCD41
+temperature, SCD41 relative humidity, BMP580 pressure, BMP580 temperature,
+SGP41 VOC index, and SGP41 NOx index. The fresh mask identifies which fields
+are present in that record, so a failed sensor does not cause an old value to
+be repeated.
+
+History is aggregated at one-minute boundaries. Only fields with at least one
+successful fresh reading in the minute are written; a completely unsuccessful
+minute produces no record. A clock sync affects records created after the
+sync, and a reboot requires synchronization again.
+
+For the configured 4 MiB flash, the upper `0x200000..0x400000` region is
+reserved for storage. Two sectors hold redundant configuration records and
+the remaining sectors form a circular log of approximately 30 days at one
+record per minute. Flash reads and writes are owned by the storage task, so BLE
+handlers do not access flash concurrently with sensor aggregation.
 
 ## Logging and troubleshooting
 

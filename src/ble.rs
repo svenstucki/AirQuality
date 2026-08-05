@@ -1,11 +1,16 @@
 use defmt::{info, warn};
 use embassy_futures::join::join;
 use embassy_futures::select::{Either, select};
+use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use esp_hal::peripherals::BT;
 use trouble_host::prelude::*;
 
-use crate::{led, sensors::SensorSnapshot};
+use crate::{
+    led,
+    sensors::SensorSnapshot,
+    storage::{ERASE_TOKEN, StorageCommand, StorageResponse},
+};
 
 #[gatt_service(uuid = "7c3e1000-4e0a-4a69-9c57-6b5f3f1c0000")]
 pub struct AirQualityService {
@@ -37,16 +42,35 @@ pub struct RgbLedService {
     pub color: [u8; 3],
 }
 
+#[gatt_service(uuid = "7c3e3000-4e0a-4a69-9c57-6b5f3f1c0000")]
+pub struct StorageService {
+    #[characteristic(uuid = "7c3e3001-4e0a-4a69-9c57-6b5f3f1c0000", read, write, value = [0])]
+    pub control: [u8; 1],
+    #[characteristic(uuid = "7c3e3002-4e0a-4a69-9c57-6b5f3f1c0000", write)]
+    pub clock_sync: [u8; 4],
+    #[characteristic(uuid = "7c3e3003-4e0a-4a69-9c57-6b5f3f1c0000", read, value = [0; 24])]
+    pub metadata: [u8; 24],
+    #[characteristic(uuid = "7c3e3004-4e0a-4a69-9c57-6b5f3f1c0000", write)]
+    pub history_request: [u8; 6],
+    #[characteristic(uuid = "7c3e3005-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0; 244])]
+    pub history_data: [u8; 244],
+    #[characteristic(uuid = "7c3e3006-4e0a-4a69-9c57-6b5f3f1c0000", write)]
+    pub erase: [u8; 5],
+}
+
 #[gatt_server]
 pub struct Server {
     pub air_quality: AirQualityService,
     pub rgb_led: RgbLedService,
+    pub storage: StorageService,
 }
 
 pub async fn run(
     bluetooth: BT<'static>,
     mut led_driver: led::Led<'static>,
     updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+    storage_commands: Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>,
+    storage_responses: &'static Signal<CriticalSectionRawMutex, StorageResponse>,
 ) -> ! {
     let connector = esp_radio::ble::controller::BleConnector::new(bluetooth, Default::default())
         .expect("BLE connector initialization failed");
@@ -104,7 +128,20 @@ pub async fn run(
                     .unwrap();
                 let current = updates.wait().await;
                 set_server_snapshot(&server, current);
-                handle_connection(conn, &server, &mut led_driver, updates).await;
+                request_metadata(&storage_commands).await;
+                if let StorageResponse::Metadata { data } = storage_responses.wait().await {
+                    let _ = server.set(&server.storage.metadata, &data);
+                    let _ = server.set(&server.storage.control, &[data[0]]);
+                }
+                handle_connection(
+                    conn,
+                    &server,
+                    &mut led_driver,
+                    updates,
+                    &storage_commands,
+                    storage_responses,
+                )
+                .await;
                 info!("BLE client disconnected");
             }
         },
@@ -118,6 +155,8 @@ async fn handle_connection<C>(
     server: &Server<'_>,
     led_driver: &mut led::Led<'_>,
     updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+    storage_commands: &Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>,
+    storage_responses: &Signal<CriticalSectionRawMutex, StorageResponse>,
 ) where
     C: PacketPool,
 {
@@ -145,6 +184,67 @@ async fn handle_connection<C>(
                         let _ = server.rgb_led.color.notify(&conn, &color).await;
                     }
                 }
+                GattEvent::Write(write) if write.handle() == server.storage.control.handle => {
+                    if write.data().len() == 1 && write.data()[0] <= 1 {
+                        let _ = storage_commands
+                            .send(StorageCommand::SetEnabled(write.data()[0] != 0))
+                            .await;
+                        let _ = storage_responses.wait().await;
+                        let _ = server.set(&server.storage.control, &[write.data()[0]]);
+                        refresh_metadata(server, storage_commands, storage_responses).await;
+                    }
+                    if let Ok(reply) = write.accept() {
+                        reply.send().await;
+                    }
+                }
+                GattEvent::Write(write) if write.handle() == server.storage.clock_sync.handle => {
+                    if write.data().len() == 4 {
+                        let unix = u32::from_le_bytes(write.data().try_into().unwrap());
+                        let _ = storage_commands.send(StorageCommand::SyncClock(unix)).await;
+                        let _ = storage_responses.wait().await;
+                        refresh_metadata(server, storage_commands, storage_responses).await;
+                    }
+                    if let Ok(reply) = write.accept() {
+                        reply.send().await;
+                    }
+                }
+                GattEvent::Write(write)
+                    if write.handle() == server.storage.history_request.handle =>
+                {
+                    if write.data().len() == 6 {
+                        let cursor = u32::from_le_bytes(write.data()[..4].try_into().unwrap());
+                        let max_records =
+                            u16::from_le_bytes(write.data()[4..6].try_into().unwrap());
+                        let _ = storage_commands
+                            .send(StorageCommand::ReadHistory {
+                                cursor,
+                                max_records,
+                            })
+                            .await;
+                        if let StorageResponse::History { data, len } =
+                            storage_responses.wait().await
+                        {
+                            info!("history response length={}", len);
+                            let _ = server.set(&server.storage.history_data, &data);
+                            let _ = server.storage.history_data.notify(&conn, &data).await;
+                        }
+                    }
+                    if let Ok(reply) = write.accept() {
+                        reply.send().await;
+                    }
+                }
+                GattEvent::Write(write) if write.handle() == server.storage.erase.handle => {
+                    if write.data() == ERASE_TOKEN {
+                        let _ = storage_commands
+                            .send(StorageCommand::Erase(ERASE_TOKEN))
+                            .await;
+                        let _ = storage_responses.wait().await;
+                        refresh_metadata(server, storage_commands, storage_responses).await;
+                    }
+                    if let Ok(reply) = write.accept() {
+                        reply.send().await;
+                    }
+                }
                 event => {
                     if let Ok(reply) = event.accept() {
                         reply.send().await;
@@ -154,6 +254,22 @@ async fn handle_connection<C>(
             Either::First(_) => {}
             Either::Second(_) => {}
         }
+    }
+}
+
+async fn request_metadata(commands: &Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>) {
+    commands.send(StorageCommand::ReadMetadata).await;
+}
+
+async fn refresh_metadata(
+    server: &Server<'_>,
+    commands: &Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>,
+    responses: &Signal<CriticalSectionRawMutex, StorageResponse>,
+) {
+    commands.send(StorageCommand::ReadMetadata).await;
+    if let StorageResponse::Metadata { data } = responses.wait().await {
+        let _ = server.set(&server.storage.metadata, &data);
+        let _ = server.set(&server.storage.control, &[data[0]]);
     }
 }
 

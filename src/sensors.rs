@@ -1,5 +1,5 @@
 use defmt::{info, warn};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
 use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c;
 use gas_index_algorithm::{AlgorithmType, GasIndexAlgorithm};
@@ -23,13 +23,23 @@ pub struct SensorSnapshot {
     pub status: u8,
 }
 
+#[derive(Clone, Copy)]
+pub struct SensorUpdate {
+    pub snapshot: SensorSnapshot,
+    /// Bits use the same field order as the persistent record format.
+    pub fresh_mask: u16,
+}
+
 const SHT41_OK: u8 = 1 << 0;
 const SCD41_OK: u8 = 1 << 1;
 const BMP580_OK: u8 = 1 << 2;
 const SGP41_OK: u8 = 1 << 3;
 
-pub async fn run<I2C>(mut i2c: I2C, updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>)
-where
+pub async fn run<I2C>(
+    mut i2c: I2C,
+    updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
+    history: Sender<'_, CriticalSectionRawMutex, SensorUpdate, 4>,
+) where
     I2C: I2c,
 {
     // No sensor has produced a validated measurement at startup.
@@ -49,10 +59,12 @@ where
     info!("sensor polling started: SHT41=0x44 SGP41=0x59 SCD41=0x62 BMP580=0x47");
 
     loop {
+        let mut fresh_mask = 0u16;
         if let Some(measurement) = sht41_measure(&mut i2c).await {
             snapshot.sht41_temperature_centi_c = measurement.0;
             snapshot.sht41_humidity_centi_percent = measurement.1;
             snapshot.status |= SHT41_OK;
+            fresh_mask |= (1 << 0) | (1 << 1);
         } else {
             snapshot.status &= !SHT41_OK;
             warn!("SHT41 read failed");
@@ -87,6 +99,7 @@ where
                 // processed values are available.
                 if voc_index != 0 && nox_index != 0 {
                     snapshot.status |= SGP41_OK;
+                    fresh_mask |= (1 << 7) | (1 << 8);
                 } else {
                     snapshot.status &= !SGP41_OK;
                 }
@@ -104,6 +117,7 @@ where
                 snapshot.bmp580_pressure_pa = measurement.0;
                 snapshot.bmp580_temperature_centi_c = measurement.1;
                 snapshot.status |= BMP580_OK;
+                fresh_mask |= (1 << 5) | (1 << 6);
             } else {
                 snapshot.status &= !BMP580_OK;
                 warn!("BMP580 read failed");
@@ -121,6 +135,7 @@ where
                         snapshot.scd41_temperature_centi_c = measurement.1;
                         snapshot.scd41_humidity_centi_percent = measurement.2;
                         snapshot.status |= SCD41_OK;
+                        fresh_mask |= (1 << 2) | (1 << 3) | (1 << 4);
                     } else {
                         snapshot.status &= !SCD41_OK;
                         warn!("SCD41 measurement read failed");
@@ -135,6 +150,10 @@ where
         }
 
         updates.signal(snapshot);
+        let _ = history.try_send(SensorUpdate {
+            snapshot,
+            fresh_mask,
+        });
         Timer::after(Duration::from_secs(1)).await;
     }
 }

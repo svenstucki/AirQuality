@@ -6,10 +6,14 @@ esp_bootloader_esp_idf::esp_app_desc!();
 mod ble;
 mod led;
 mod sensors;
+mod storage;
+mod storage_format;
 
 use defmt::info;
-use embassy_futures::join::join;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_futures::join::join3;
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
 use embassy_time::Duration;
 use esp_hal::{
     clock::CpuClock,
@@ -18,9 +22,13 @@ use esp_hal::{
     rmt::TxChannelCreator,
     timer::timg::TimerGroup,
 };
-use sensors::SensorSnapshot;
+use sensors::{SensorSnapshot, SensorUpdate};
+use storage::{StorageCommand, StorageResponse};
 
 static SENSOR_UPDATES: Signal<CriticalSectionRawMutex, SensorSnapshot> = Signal::new();
+static SENSOR_HISTORY: Channel<CriticalSectionRawMutex, SensorUpdate, 4> = Channel::new();
+static STORAGE_COMMANDS: Channel<CriticalSectionRawMutex, StorageCommand, 4> = Channel::new();
+static STORAGE_RESPONSES: Signal<CriticalSectionRawMutex, StorageResponse> = Signal::new();
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
     esp_alloc::heap_allocator!(size: 72 * 1024);
@@ -56,9 +64,21 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let led = led::Led::new(led_channel);
     info!("air-quality firmware starting; I2C SDA=GPIO6 SCL=GPIO7 LED=GPIO8");
 
-    join(
-        sensors::run(i2c, &SENSOR_UPDATES),
-        ble::run(peripherals.BT, led, &SENSOR_UPDATES),
+    join3(
+        sensors::run(i2c, &SENSOR_UPDATES, SENSOR_HISTORY.sender()),
+        ble::run(
+            peripherals.BT,
+            led,
+            &SENSOR_UPDATES,
+            STORAGE_COMMANDS.sender(),
+            &STORAGE_RESPONSES,
+        ),
+        storage::run(
+            esp_storage::FlashStorage::new(peripherals.FLASH),
+            SENSOR_HISTORY.receiver(),
+            STORAGE_COMMANDS.receiver(),
+            &STORAGE_RESPONSES,
+        ),
     )
     .await;
 
