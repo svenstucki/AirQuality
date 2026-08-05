@@ -338,6 +338,13 @@ fn handle_command(
 ) {
     match command {
         StorageCommand::SetEnabled(enabled) => {
+            // BLE clients are allowed to repeat writes. Do not erase a config
+            // sector when the persisted value is already identical.
+            if config.enabled == enabled {
+                responses.signal(StorageResponse::Ack);
+                info!("storage enable state unchanged: {}", enabled);
+                return;
+            }
             config.enabled = enabled;
             config.generation = config.generation.wrapping_add(1).max(1);
             save_config(flash, *config);
