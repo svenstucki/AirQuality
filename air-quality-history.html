@@ -560,6 +560,7 @@
       function handleDisconnected() {
         stopMetadataRefresh();
         if (state.pendingPage) {
+          clearTimeout(state.pendingPage.timeout);
           state.pendingPage.reject(new Error('The sensor disconnected during history retrieval'));
           state.pendingPage = null;
         }
@@ -675,30 +676,52 @@
         } finally { setBusy(false); }
       }
 
-      function handleHistoryNotification(event) {
-        if (!state.pendingPage) return;
-        const pending = state.pendingPage;
+      function finishPendingPage(pending) {
+        if (state.pendingPage !== pending || !pending.page || !pending.writeComplete) return;
         state.pendingPage = null;
         clearTimeout(pending.timeout);
-        try { pending.resolve(parseHistoryPage(event.target.value)); }
-        catch (error) { pending.reject(error); }
+        pending.resolve(pending.page);
+      }
+
+      function handleHistoryNotification(event) {
+        const pending = state.pendingPage;
+        if (!pending) return;
+        try {
+          pending.page = parseHistoryPage(event.target.value);
+          finishPendingPage(pending);
+        } catch (error) {
+          if (state.pendingPage === pending) state.pendingPage = null;
+          clearTimeout(pending.timeout);
+          pending.reject(error);
+        }
       }
 
       function requestPage(cursor) {
-        return new Promise(async (resolve, reject) => {
-          const timeout = setTimeout(() => {
-            if (state.pendingPage && state.pendingPage.resolve === resolve) {
-              state.pendingPage = null;
-              reject(new Error('Timed out waiting for a history page'));
-            }
+        return new Promise((resolve, reject) => {
+          const pending = {
+            resolve,
+            reject,
+            timeout: null,
+            page: null,
+            writeComplete: false
+          };
+          pending.timeout = setTimeout(() => {
+            if (state.pendingPage !== pending) return;
+            state.pendingPage = null;
+            reject(new Error('Timed out waiting for a history page'));
           }, 10000);
-          state.pendingPage = { resolve, reject, timeout };
-          try { await writeCharacteristic(characteristics.historyRequest, writeHistoryRequest(cursor)); }
-          catch (error) {
-            clearTimeout(timeout);
-            if (state.pendingPage && state.pendingPage.resolve === resolve) state.pendingPage = null;
-            reject(error);
-          }
+          state.pendingPage = pending;
+          writeCharacteristic(characteristics.historyRequest, writeHistoryRequest(cursor))
+            .then(() => {
+              if (state.pendingPage !== pending) return;
+              pending.writeComplete = true;
+              finishPendingPage(pending);
+            })
+            .catch(error => {
+              if (state.pendingPage === pending) state.pendingPage = null;
+              clearTimeout(pending.timeout);
+              reject(error);
+            });
         });
       }
 
