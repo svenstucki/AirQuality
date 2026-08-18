@@ -8,6 +8,7 @@ use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
 
 use crate::{
+    history_cursor::{FIRST_CURSOR, HistoryWalk},
     sensors::SensorUpdate,
     storage_format::{RECORD_SIZE, Record, Values},
 };
@@ -103,6 +104,7 @@ struct Clock {
 #[derive(Clone, Copy)]
 struct Ring {
     next_slot: u32,
+    oldest_slot: u32,
     count: u32,
     oldest_sequence: u32,
     newest_sequence: u32,
@@ -110,12 +112,15 @@ struct Ring {
     newest_timestamp: u32,
     oldest_utc: bool,
     newest_utc: bool,
+    ordered: bool,
+    revision: u32,
 }
 
 impl Ring {
     fn empty() -> Self {
         Self {
             next_slot: 0,
+            oldest_slot: 0,
             count: 0,
             oldest_sequence: 0,
             newest_sequence: 0,
@@ -123,6 +128,8 @@ impl Ring {
             newest_timestamp: 0,
             oldest_utc: false,
             newest_utc: false,
+            ordered: true,
+            revision: 0,
         }
     }
 
@@ -137,6 +144,7 @@ impl Ring {
         let mut newest_slot = 0;
         let mut newest: Option<Record> = None;
         let mut oldest: Option<Record> = None;
+        let mut oldest_slot = 0;
         let mut bytes = [0u8; RECORD_SIZE];
         for slot in 0..RING_CAPACITY {
             if flash.read(Self::address(slot), &mut bytes).is_err() {
@@ -151,6 +159,7 @@ impl Ring {
                 }
                 if oldest.map(|r| record.sequence < r.sequence).unwrap_or(true) {
                     oldest = Some(record);
+                    oldest_slot = slot;
                 }
             }
         }
@@ -161,17 +170,50 @@ impl Ring {
             ring.newest_utc = record.utc;
         }
         if let Some(record) = oldest {
+            ring.oldest_slot = oldest_slot;
             ring.oldest_sequence = record.sequence;
             ring.oldest_timestamp = record.timestamp;
             ring.oldest_utc = record.utc;
+            ring.ordered = ring.verify_physical_order(flash);
         }
         ring
     }
 
     fn refresh_stats(&mut self, flash: &mut FlashStorage<'static>) {
+        let revision = self.revision.wrapping_add(1);
         let mut current = Self::scan(flash);
         current.next_slot = self.next_slot;
+        current.revision = revision;
         *self = current;
+    }
+
+    fn verify_physical_order(&self, flash: &mut FlashStorage<'static>) -> bool {
+        if self.count < 2 {
+            return true;
+        }
+        let mut slot = self.oldest_slot;
+        let mut visited_slots = 0;
+        let mut records_seen = 0;
+        let mut previous_sequence = None;
+        let mut bytes = [0u8; RECORD_SIZE];
+        while visited_slots < RING_CAPACITY && records_seen < self.count {
+            if flash.read(Self::address(slot), &mut bytes).is_err() {
+                return false;
+            }
+            if let Some(record) = Record::decode(&bytes) {
+                if previous_sequence
+                    .map(|sequence| record.sequence <= sequence)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+                previous_sequence = Some(record.sequence);
+                records_seen += 1;
+            }
+            slot = (slot + 1) % RING_CAPACITY;
+            visited_slots += 1;
+        }
+        records_seen == self.count
     }
 
     fn append(&mut self, flash: &mut FlashStorage<'static>, record: Record) -> Result<(), ()> {
@@ -182,7 +224,8 @@ impl Ring {
         if flash.read(address, &mut existing).is_err() {
             return Err(());
         }
-        if existing.iter().any(|byte| *byte != 0xff) {
+        let sector_erased = existing.iter().any(|byte| *byte != 0xff);
+        if sector_erased {
             if flash
                 .erase(sector_start, sector_start + SECTOR_SIZE)
                 .is_err()
@@ -200,7 +243,21 @@ impl Ring {
             return Err(());
         }
         self.next_slot = (slot + 1) % RING_CAPACITY;
-        self.refresh_stats(flash);
+        if sector_erased || !self.ordered {
+            // Reusing a sector invalidates all records that were in that
+            // sector. A recovery scan is necessary here, but this happens
+            // once per sector rotation rather than once per record.
+            self.refresh_stats(flash);
+            return Ok(());
+        }
+        if self.count == 0 {
+            self.oldest_slot = slot;
+        }
+        self.count += 1;
+        self.newest_sequence = record.sequence;
+        self.newest_timestamp = record.timestamp;
+        self.newest_utc = record.utc;
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 }
@@ -270,6 +327,7 @@ pub async fn run(
     let mut ring = Ring::scan(&mut flash);
     let mut clock = None;
     let mut bucket = Bucket::new(Instant::now().as_secs() / 60);
+    let mut history_walk = HistoryWalk::default();
     info!(
         "storage ready: enabled={} records={}",
         config.enabled, ring.count
@@ -307,6 +365,7 @@ pub async fn run(
                     &mut config,
                     &mut bucket,
                     &mut clock,
+                    &mut history_walk,
                     responses,
                 );
             }
@@ -334,6 +393,7 @@ fn handle_command(
     config: &mut Config,
     bucket: &mut Bucket,
     clock: &mut Option<Clock>,
+    history_walk: &mut HistoryWalk,
     responses: &Signal<CriticalSectionRawMutex, StorageResponse>,
 ) {
     match command {
@@ -341,6 +401,7 @@ fn handle_command(
             // BLE clients are allowed to repeat writes. Do not erase a config
             // sector when the persisted value is already identical.
             if config.enabled == enabled {
+                history_walk.stop();
                 responses.signal(StorageResponse::Ack);
                 info!("storage enable state unchanged: {}", enabled);
                 return;
@@ -350,6 +411,7 @@ fn handle_command(
             save_config(flash, *config);
             bucket.fresh_mask = 0;
             bucket.minute = Instant::now().as_secs() / 60;
+            history_walk.stop();
             responses.signal(StorageResponse::Ack);
             info!("storage {}", if enabled { "enabled" } else { "disabled" });
         }
@@ -358,6 +420,7 @@ fn handle_command(
                 unix_at_sync: unix_seconds,
                 monotonic_at_sync: Instant::now().as_secs(),
             });
+            history_walk.stop();
             responses.signal(StorageResponse::Ack);
             info!("storage clock synchronized: unix={}", unix_seconds);
         }
@@ -368,14 +431,13 @@ fn handle_command(
             cursor,
             max_records,
         } => {
-            responses.signal(StorageResponse::History {
-                data: history(flash, ring, cursor, max_records),
-                len: history_len(flash, ring, cursor, max_records),
-            });
+            let (data, len) = history(flash, ring, cursor, max_records, history_walk);
+            responses.signal(StorageResponse::History { data, len });
         }
         StorageCommand::Erase(token) => {
             if token == ERASE_TOKEN && erase_history(flash).is_ok() {
                 *ring = Ring::empty();
+                history_walk.stop();
                 responses.signal(StorageResponse::Ack);
                 info!("storage history erased");
             } else {
@@ -485,10 +547,11 @@ fn history(
     ring: &Ring,
     cursor: u32,
     max_records: u16,
-) -> [u8; HISTORY_DATA_SIZE] {
+    history_walk: &mut HistoryWalk,
+) -> ([u8; HISTORY_DATA_SIZE], u16) {
     let mut out = [0u8; HISTORY_DATA_SIZE];
-    let (records, count) = collect_history(flash, ring, cursor, max_records);
-    let mut cursor_out = 0u32;
+    let (records, count, cursor_out) =
+        collect_history(flash, ring, cursor, max_records, history_walk);
     let mut offset = 5;
     out[4] = count as u8;
     for record in records.iter().flatten() {
@@ -496,20 +559,9 @@ fn history(
         out[offset] = RECORD_SIZE as u8;
         out[offset + 1..offset + 1 + RECORD_SIZE].copy_from_slice(&encoded);
         offset += RECORD_SIZE + 1;
-        cursor_out = record.sequence.wrapping_add(1);
     }
     out[..4].copy_from_slice(&cursor_out.to_le_bytes());
-    out
-}
-
-fn history_len(
-    flash: &mut FlashStorage<'static>,
-    ring: &Ring,
-    cursor: u32,
-    max_records: u16,
-) -> u16 {
-    let (_, count) = collect_history(flash, ring, cursor, max_records);
-    (5 + count * (RECORD_SIZE + 1)) as u16
+    (out, offset as u16)
 }
 
 fn collect_history(
@@ -517,18 +569,77 @@ fn collect_history(
     ring: &Ring,
     cursor: u32,
     max_records: u16,
-) -> ([Option<Record>; HISTORY_MAX_RECORDS], usize) {
-    let mut records = [None; HISTORY_MAX_RECORDS];
-    let mut count = 0;
-    let start = if cursor == u32::MAX {
+    history_walk: &mut HistoryWalk,
+) -> ([Option<Record>; HISTORY_MAX_RECORDS], usize, u32) {
+    let mut records: [Option<Record>; HISTORY_MAX_RECORDS] = [None; HISTORY_MAX_RECORDS];
+    let limit = (max_records as usize).min(HISTORY_MAX_RECORDS);
+    if limit == 0 || ring.count == 0 {
+        history_walk.stop();
+        return (records, 0, 0);
+    }
+
+    if !ring.ordered {
+        return collect_history_fallback(flash, ring, cursor, limit, history_walk);
+    }
+
+    if cursor == FIRST_CURSOR || !history_walk.can_continue(cursor, ring.revision) {
+        history_walk.restart(ring.oldest_slot, ring.newest_sequence, ring.revision);
+    }
+
+    let start = if cursor == FIRST_CURSOR {
         ring.oldest_sequence
     } else {
         cursor
     };
-    let limit = (max_records as usize).min(HISTORY_MAX_RECORDS);
-    if limit == 0 || ring.count == 0 {
-        return (records, 0);
+    let mut count = 0;
+    let mut next_cursor = 0;
+    let mut bytes = [0u8; RECORD_SIZE];
+    while history_walk.visited_slots < RING_CAPACITY && count < limit {
+        let slot = history_walk.next_slot;
+        if flash.read(Ring::address(slot), &mut bytes).is_err() {
+            history_walk.advance_slot(RING_CAPACITY);
+            continue;
+        }
+        let record = Record::decode(&bytes);
+        history_walk.advance_slot(RING_CAPACITY);
+        let Some(record) = record else {
+            continue;
+        };
+        if record.sequence < start {
+            continue;
+        }
+        if record.sequence > history_walk.end_sequence {
+            break;
+        }
+        records[count] = Some(record);
+        count += 1;
+        next_cursor = if record.sequence == history_walk.end_sequence {
+            0
+        } else {
+            record.sequence.wrapping_add(1)
+        };
+        if next_cursor == 0 {
+            break;
+        }
     }
+    history_walk.set_next_cursor(next_cursor);
+    (records, count, next_cursor)
+}
+
+fn collect_history_fallback(
+    flash: &mut FlashStorage<'static>,
+    ring: &Ring,
+    cursor: u32,
+    limit: usize,
+    history_walk: &mut HistoryWalk,
+) -> ([Option<Record>; HISTORY_MAX_RECORDS], usize, u32) {
+    let mut records: [Option<Record>; HISTORY_MAX_RECORDS] = [None; HISTORY_MAX_RECORDS];
+    let mut count = 0;
+    let start = if cursor == FIRST_CURSOR {
+        ring.oldest_sequence
+    } else {
+        cursor
+    };
     let mut bytes = [0u8; RECORD_SIZE];
     for slot in 0..RING_CAPACITY {
         if flash.read(Ring::address(slot), &mut bytes).is_err() {
@@ -554,7 +665,17 @@ fn collect_history(
             }
         }
     }
-    (records, count)
+    history_walk.stop();
+    let next_cursor = records[count.saturating_sub(1)]
+        .map(|record| {
+            if record.sequence == ring.newest_sequence {
+                0
+            } else {
+                record.sequence.wrapping_add(1)
+            }
+        })
+        .unwrap_or(0);
+    (records, count, next_cursor)
 }
 
 fn crc16(bytes: &[u8]) -> u16 {

@@ -4,6 +4,7 @@
 esp_bootloader_esp_idf::esp_app_desc!();
 
 mod ble;
+mod history_cursor;
 mod led;
 mod sensors;
 mod storage;

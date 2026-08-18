@@ -750,13 +750,13 @@
                 state.records.push(record);
               }
             });
-            state.records.sort((a, b) => a.sequence - b.sequence);
             $('progress-count').textContent = formatNumber(state.records.length) + ' records';
             $('retrieval-progress').value = Math.min(state.records.length, $('retrieval-progress').max);
             if (page.count === 0 || page.nextCursor === 0) break;
             if (page.nextCursor === cursor) throw new Error('History cursor did not advance');
             cursor = page.nextCursor;
           }
+          state.records.sort((a, b) => a.sequence - b.sequence);
           rebuildSegments();
           try { await refreshMetadata(); }
           catch (error) { console.warn('Could not refresh storage metadata after retrieval', error); }
