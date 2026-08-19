@@ -22,7 +22,7 @@ hardware README:
 | SGP41 VOC/NOx | `0x59` | Every second |
 | SCD41 CO₂ | `0x62` | Periodic measurement, approximately every five seconds |
 | BMP580 pressure/temperature | `0x47` | Every second |
-| DS3231 RTC | `0x68` | Not used yet |
+| DS3231 RTC | `0x68` | Startup read plus five-minute health checks |
 
 Sensor failures are non-fatal. The firmware logs the failure with `defmt`,
 keeps the last valid value, clears the corresponding BLE status bit, and tries
@@ -63,6 +63,8 @@ record codec can be tested on the host without selecting the embedded target:
 ```text
 rustc --edition=2024 --test src/storage_format.rs -o /tmp/air-quality-storage-format-tests
 /tmp/air-quality-storage-format-tests
+rustc --edition=2024 --test src/rtc.rs -o /tmp/air-quality-rtc-tests
+/tmp/air-quality-rtc-tests
 ```
 
 ## BLE GATT service
@@ -120,6 +122,45 @@ Its payload is exactly three bytes `[R, G, B]`. `[0, 0, 0]` turns the LED off.
 The firmware converts this logical RGB order to the WS2818B's wire order
 (GRB). Brightness is not a separate field; clients can scale the three color
 bytes before writing them.
+
+### RTC service
+
+The DS3231 RTC shares the I²C bus at address `0x68`. The firmware reads it at
+startup and then performs a health check approximately every five minutes.
+The continuously available board time is calculated from a monotonic ESP32
+clock anchored to a valid RTC reading or a successful BLE synchronization, so
+BLE reads do not trigger an I²C transaction.
+
+Service UUID:
+
+```text
+7c3e4000-4e0a-4a69-9c57-6b5f3f1c0000
+```
+
+| Characteristic | UUID | Properties | Encoding |
+| --- | --- | --- | --- |
+| Board time | `7c3e4001-4e0a-4a69-9c57-6b5f3f1c0000` | Read, Notify | 4-byte Unix seconds LE followed by one status byte |
+
+The status byte uses these flags:
+
+```text
+bit 0   local clock is valid
+bit 1   latest successful RTC sample is valid
+bit 2   DS3231 oscillator-stop flag (OSF) is set
+bit 3   latest RTC read failed
+```
+
+The board time remains available from the local monotonic clock if OSF or a
+later RTC I²C error occurs during the same firmware session. A valid RTC time
+at startup causes persistent history to use UTC immediately. If no valid RTC
+time exists after reboot, history uses uptime until the client synchronizes
+the clock through the storage service's existing `3002` characteristic.
+
+That synchronization writes and verifies the DS3231 first, clears OSF, and
+only then anchors the local and history clocks. The DS3231 does not expose a
+battery-voltage or charge-percentage measurement register; OSF is the
+available oscillator/backup-time health indication. Measuring battery level
+would require an additional voltage-monitoring circuit and ADC input.
 
 ### Persistent sensor history service
 
@@ -181,8 +222,10 @@ be repeated.
 
 History is aggregated at one-minute boundaries. Only fields with at least one
 successful fresh reading in the minute are written; a completely unsuccessful
-minute produces no record. A clock sync affects records created after the
-sync, and a reboot requires synchronization again.
+minute produces no record. A valid RTC startup read or successful clock sync
+affects records created after that anchor. A runtime RTC fault does not clear
+an existing local clock anchor; only a reboot without a valid RTC or BLE sync
+requires uptime timestamps.
 
 For the configured 4 MiB flash, the upper `0x200000..0x400000` region is
 reserved for storage. Two sectors hold redundant configuration records and

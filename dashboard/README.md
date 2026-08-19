@@ -15,5 +15,10 @@ Then open `http://localhost:8000/air-quality.html` or
 
 - `air-quality.html` shows live CO₂, NOx, temperature, pressure, sensor status,
   and RGB LED controls.
-- `air-quality-history.html` manages persistent storage, clock synchronization,
-  history retrieval, graphing, and CSV export.
+- `air-quality-history.html` manages persistent storage, DS3231/local clock
+  synchronization and comparison, history retrieval, graphing, and CSV export.
+
+The history dashboard reads the RTC service
+(`7c3e4000-4e0a-4a69-9c57-6b5f3f1c0000`) and compares the board's locally
+extrapolated Unix time with the computer clock using the BLE read midpoint and
+round-trip latency.

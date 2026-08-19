@@ -1,13 +1,17 @@
 use defmt::{info, warn};
 use embassy_futures::join::join;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::channel::Sender;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal, watch::Receiver as WatchReceiver,
+};
+use embassy_time::Instant;
 use esp_hal::peripherals::BT;
 use trouble_host::prelude::*;
 
 use crate::{
     led,
+    rtc::{ClockState, Command as RtcCommand, Response as RtcResponse},
     sensors::SensorSnapshot,
     storage::{ERASE_TOKEN, StorageCommand, StorageResponse},
 };
@@ -58,11 +62,18 @@ pub struct StorageService {
     pub erase: [u8; 5],
 }
 
+#[gatt_service(uuid = "7c3e4000-4e0a-4a69-9c57-6b5f3f1c0000")]
+pub struct RtcService {
+    #[characteristic(uuid = "7c3e4001-4e0a-4a69-9c57-6b5f3f1c0000", read, notify, value = [0; 5])]
+    pub time: [u8; 5],
+}
+
 #[gatt_server]
 pub struct Server {
     pub air_quality: AirQualityService,
     pub rgb_led: RgbLedService,
     pub storage: StorageService,
+    pub rtc: RtcService,
 }
 
 pub async fn run(
@@ -71,6 +82,9 @@ pub async fn run(
     updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
     storage_commands: Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>,
     storage_responses: &'static Signal<CriticalSectionRawMutex, StorageResponse>,
+    rtc_commands: Sender<'static, CriticalSectionRawMutex, RtcCommand, 4>,
+    rtc_responses: &'static Signal<CriticalSectionRawMutex, RtcResponse>,
+    mut rtc_state: WatchReceiver<'static, CriticalSectionRawMutex, ClockState, 1>,
 ) -> ! {
     let connector = esp_radio::ble::controller::BleConnector::new(bluetooth, Default::default())
         .expect("BLE connector initialization failed");
@@ -133,6 +147,7 @@ pub async fn run(
                     let _ = server.set(&server.storage.metadata, &data);
                     let _ = server.set(&server.storage.control, &[data[0]]);
                 }
+                update_rtc_value(&server, &mut rtc_state);
                 handle_connection(
                     conn,
                     &server,
@@ -140,6 +155,9 @@ pub async fn run(
                     updates,
                     &storage_commands,
                     storage_responses,
+                    &rtc_commands,
+                    rtc_responses,
+                    &mut rtc_state,
                 )
                 .await;
                 info!("BLE client disconnected");
@@ -157,18 +175,33 @@ async fn handle_connection<C>(
     updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
     storage_commands: &Sender<'static, CriticalSectionRawMutex, StorageCommand, 4>,
     storage_responses: &Signal<CriticalSectionRawMutex, StorageResponse>,
+    rtc_commands: &Sender<'static, CriticalSectionRawMutex, RtcCommand, 4>,
+    rtc_responses: &Signal<CriticalSectionRawMutex, RtcResponse>,
+    rtc_state: &mut WatchReceiver<'static, CriticalSectionRawMutex, ClockState, 1>,
 ) where
     C: PacketPool,
 {
     loop {
-        match select(conn.next(), notify_updates(&conn, server, updates)).await {
-            Either::First(GattConnectionEvent::Disconnected { .. }) => break,
-            Either::First(GattConnectionEvent::Gatt { event }) => match event {
+        match select3(
+            conn.next(),
+            notify_updates(&conn, server, updates),
+            notify_rtc(&conn, server, rtc_state),
+        )
+        .await
+        {
+            Either3::First(GattConnectionEvent::Disconnected { .. }) => break,
+            Either3::First(GattConnectionEvent::Gatt { event }) => match event {
                 GattEvent::Read(read) if read.handle() == server.storage.metadata.handle() => {
                     // Metadata is derived from the storage ring, which can change while
                     // a connection is active. Refresh the characteristic before replying
                     // so clients polling it receive current record counts and timestamps.
                     refresh_metadata(server, storage_commands, storage_responses).await;
+                    if let Ok(reply) = read.accept() {
+                        reply.send().await;
+                    }
+                }
+                GattEvent::Read(read) if read.handle() == server.rtc.time.handle() => {
+                    update_rtc_value(server, rtc_state);
                     if let Ok(reply) = read.accept() {
                         reply.send().await;
                     }
@@ -209,8 +242,16 @@ async fn handle_connection<C>(
                 GattEvent::Write(write) if write.handle() == server.storage.clock_sync.handle => {
                     if write.data().len() == 4 {
                         let unix = u32::from_le_bytes(write.data().try_into().unwrap());
-                        let _ = storage_commands.send(StorageCommand::SyncClock(unix)).await;
-                        let _ = storage_responses.wait().await;
+                        let _ = rtc_commands.send(RtcCommand::SetUnix(unix)).await;
+                        let result = rtc_responses.wait().await;
+                        if result.success {
+                            let _ = server.set(
+                                &server.rtc.time,
+                                &result.state.payload(Instant::now().as_secs()),
+                            );
+                        } else {
+                            warn!("BLE clock sync rejected because RTC update failed");
+                        }
                         refresh_metadata(server, storage_commands, storage_responses).await;
                     }
                     if let Ok(reply) = write.accept() {
@@ -260,8 +301,9 @@ async fn handle_connection<C>(
                     }
                 }
             },
-            Either::First(_) => {}
-            Either::Second(_) => {}
+            Either3::First(_) => {}
+            Either3::Second(_) => {}
+            Either3::Third(_) => {}
         }
     }
 }
@@ -280,6 +322,28 @@ async fn refresh_metadata(
         let _ = server.set(&server.storage.metadata, &data);
         let _ = server.set(&server.storage.control, &[data[0]]);
     }
+}
+
+fn update_rtc_value(
+    server: &Server<'_>,
+    rtc_state: &mut WatchReceiver<'static, CriticalSectionRawMutex, ClockState, 1>,
+) {
+    if let Some(state) = rtc_state.try_get() {
+        let _ = server.set(&server.rtc.time, &state.payload(Instant::now().as_secs()));
+    }
+}
+
+async fn notify_rtc<C>(
+    conn: &GattConnection<'_, '_, C>,
+    server: &Server<'_>,
+    rtc_state: &mut WatchReceiver<'static, CriticalSectionRawMutex, ClockState, 1>,
+) where
+    C: PacketPool,
+{
+    let state = rtc_state.changed().await;
+    let payload = state.payload(Instant::now().as_secs());
+    let _ = server.set(&server.rtc.time, &payload);
+    let _ = server.rtc.time.notify(conn, &payload).await;
 }
 
 async fn notify_updates<C>(

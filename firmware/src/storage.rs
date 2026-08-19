@@ -1,5 +1,5 @@
 use defmt::{info, warn};
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver, signal::Signal,
 };
@@ -9,6 +9,7 @@ use esp_storage::FlashStorage;
 
 use crate::{
     history_cursor::{FIRST_CURSOR, HistoryWalk},
+    rtc::ClockEvent,
     sensors::SensorUpdate,
     storage_format::{RECORD_SIZE, Record, Values},
 };
@@ -39,7 +40,6 @@ const _: () = {
 #[derive(Clone, Copy)]
 pub enum StorageCommand {
     SetEnabled(bool),
-    SyncClock(u32),
     ReadMetadata,
     ReadHistory { cursor: u32, max_records: u16 },
     Erase([u8; 5]),
@@ -319,6 +319,7 @@ pub async fn run(
     updates: Receiver<'static, CriticalSectionRawMutex, SensorUpdate, 4>,
     commands: Receiver<'static, CriticalSectionRawMutex, StorageCommand, 4>,
     responses: &'static Signal<CriticalSectionRawMutex, StorageResponse>,
+    clock_events: Receiver<'static, CriticalSectionRawMutex, ClockEvent, 4>,
 ) -> ! {
     let mut config = load_config(&mut flash);
     config.boot_generation = config.boot_generation.wrapping_add(1).max(1);
@@ -326,6 +327,24 @@ pub async fn run(
     save_config(&mut flash, config);
     let mut ring = Ring::scan(&mut flash);
     let mut clock = None;
+    match clock_events.receive().await {
+        ClockEvent::Anchored {
+            unix_seconds,
+            monotonic_seconds,
+        } => {
+            clock = Some(Clock {
+                unix_at_sync: unix_seconds,
+                monotonic_at_sync: monotonic_seconds,
+            });
+            info!(
+                "storage clock anchored by startup RTC: unix={}",
+                unix_seconds
+            );
+        }
+        ClockEvent::StartupUnavailable => {
+            info!("storage clock has no valid startup RTC anchor");
+        }
+    }
     let mut bucket = Bucket::new(Instant::now().as_secs() / 60);
     let mut history_walk = HistoryWalk::default();
     info!(
@@ -334,14 +353,15 @@ pub async fn run(
     );
 
     loop {
-        match select3(
+        match select4(
             updates.receive(),
             commands.receive(),
             Timer::after(Duration::from_secs(1)),
+            clock_events.receive(),
         )
         .await
         {
-            Either3::First(update) => {
+            Either4::First(update) => {
                 let minute = Instant::now().as_secs() / 60;
                 if config.enabled {
                     if minute != bucket.minute {
@@ -357,7 +377,7 @@ pub async fn run(
                     bucket.update(update);
                 }
             }
-            Either3::Second(command) => {
+            Either4::Second(command) => {
                 handle_command(
                     command,
                     &mut flash,
@@ -369,7 +389,7 @@ pub async fn run(
                     responses,
                 );
             }
-            Either3::Third(_) => {
+            Either4::Third(_) => {
                 let minute = Instant::now().as_secs() / 60;
                 if config.enabled && minute != bucket.minute {
                     flush_bucket(
@@ -382,6 +402,19 @@ pub async fn run(
                     bucket = Bucket::new(minute);
                 }
             }
+            Either4::Fourth(event) => match event {
+                ClockEvent::StartupUnavailable => {}
+                ClockEvent::Anchored {
+                    unix_seconds,
+                    monotonic_seconds,
+                } => {
+                    clock = Some(Clock {
+                        unix_at_sync: unix_seconds,
+                        monotonic_at_sync: monotonic_seconds,
+                    });
+                    info!("storage clock anchored by RTC: unix={}", unix_seconds);
+                }
+            },
         }
     }
 }
@@ -414,15 +447,6 @@ fn handle_command(
             history_walk.stop();
             responses.signal(StorageResponse::Ack);
             info!("storage {}", if enabled { "enabled" } else { "disabled" });
-        }
-        StorageCommand::SyncClock(unix_seconds) => {
-            *clock = Some(Clock {
-                unix_at_sync: unix_seconds,
-                monotonic_at_sync: Instant::now().as_secs(),
-            });
-            history_walk.stop();
-            responses.signal(StorageResponse::Ack);
-            info!("storage clock synchronized: unix={}", unix_seconds);
         }
         StorageCommand::ReadMetadata => responses.signal(StorageResponse::Metadata {
             data: metadata(*config, clock.is_some(), *ring),

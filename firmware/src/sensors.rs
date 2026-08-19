@@ -1,8 +1,15 @@
 use defmt::{info, warn};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, signal::Signal};
-use embassy_time::{Duration, Timer};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::{Receiver, Sender},
+    signal::Signal,
+    watch::Sender as WatchSender,
+};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_hal_async::i2c::I2c;
 use gas_index_algorithm::{AlgorithmType, GasIndexAlgorithm};
+
+use crate::rtc::{ClockEvent, ClockState, Command as RtcCommand, Ds3231, Response as RtcResponse};
 
 const SHT41: u8 = 0x44;
 const SGP41: u8 = 0x59;
@@ -44,6 +51,10 @@ pub async fn run<I2C>(
     mut i2c: I2C,
     updates: &Signal<CriticalSectionRawMutex, SensorSnapshot>,
     history: Sender<'_, CriticalSectionRawMutex, SensorUpdate, 4>,
+    rtc_commands: Receiver<'static, CriticalSectionRawMutex, RtcCommand, 4>,
+    rtc_state: WatchSender<'static, CriticalSectionRawMutex, ClockState, 1>,
+    clock_events: Sender<'static, CriticalSectionRawMutex, ClockEvent, 4>,
+    rtc_responses: &'static Signal<CriticalSectionRawMutex, RtcResponse>,
 ) where
     I2C: I2c,
 {
@@ -58,12 +69,114 @@ pub async fn run<I2C>(
     let mut sgp_initialized = false;
     let mut voc_algorithm = GasIndexAlgorithm::new(AlgorithmType::Voc, 1.0);
     let mut nox_algorithm = GasIndexAlgorithm::new(AlgorithmType::Nox, 1.0);
+    let mut rtc = Ds3231::new();
+    let mut clock_state = ClockState::default();
 
     // Allow externally powered sensor modules to finish their power-up sequence.
     Timer::after(Duration::from_millis(100)).await;
+    let mut rtc_initialized = match rtc.initialize(&mut i2c).await {
+        Ok(()) => true,
+        Err(_) => {
+            warn!("RTC startup initialization failed");
+            false
+        }
+    };
+    if rtc_initialized {
+        match rtc.read(&mut i2c).await {
+            Ok(sample) if !sample.oscillator_stopped => {
+                let monotonic_seconds = Instant::now().as_secs();
+                clock_state = ClockState::anchored(sample.unix_seconds, monotonic_seconds);
+                rtc_state.send(clock_state);
+                clock_events
+                    .send(ClockEvent::Anchored {
+                        unix_seconds: sample.unix_seconds,
+                        monotonic_seconds,
+                    })
+                    .await;
+                info!("RTC startup: valid unix={} osf=false", sample.unix_seconds);
+            }
+            Ok(sample) => {
+                clock_state.rtc_valid = false;
+                clock_state.oscillator_stopped = true;
+                clock_state.read_error = false;
+                rtc_state.send(clock_state);
+                clock_events.send(ClockEvent::StartupUnavailable).await;
+                warn!(
+                    "RTC startup: invalid stored time unix={} osf=true",
+                    sample.unix_seconds
+                );
+            }
+            Err(_) => {
+                clock_state.read_error = true;
+                rtc_state.send(clock_state);
+                clock_events.send(ClockEvent::StartupUnavailable).await;
+                warn!("RTC startup read failed");
+            }
+        }
+    } else {
+        clock_state.read_error = true;
+        rtc_state.send(clock_state);
+        clock_events.send(ClockEvent::StartupUnavailable).await;
+        warn!("RTC startup: unavailable");
+    }
+    let mut next_rtc_check = Instant::now().as_secs().saturating_add(300);
     info!("sensor polling started: SHT41=0x44 SGP41=0x59 SCD41=0x62 BMP580=0x47");
 
     loop {
+        process_rtc_commands(
+            &mut i2c,
+            &mut rtc,
+            &rtc_commands,
+            &mut clock_state,
+            &rtc_state,
+            &clock_events,
+            rtc_responses,
+        )
+        .await;
+
+        let now = Instant::now().as_secs();
+        if now >= next_rtc_check {
+            next_rtc_check = now.saturating_add(300);
+            if !rtc_initialized {
+                rtc_initialized = rtc.initialize(&mut i2c).await.is_ok();
+            }
+            let health = if rtc_initialized {
+                rtc.read(&mut i2c).await
+            } else {
+                Err(crate::rtc::Error::I2c)
+            };
+            match health {
+                Ok(sample) => {
+                    let next_state = ClockState {
+                        rtc_valid: !sample.oscillator_stopped,
+                        oscillator_stopped: sample.oscillator_stopped,
+                        read_error: false,
+                        ..clock_state
+                    };
+                    if next_state != clock_state {
+                        clock_state = next_state;
+                        rtc_state.send(clock_state);
+                    }
+                    if sample.oscillator_stopped {
+                        warn!("RTC health check: oscillator stop flag set; local clock retained");
+                    } else {
+                        info!("RTC health check: valid");
+                    }
+                }
+                Err(_) => {
+                    let next_state = ClockState {
+                        read_error: true,
+                        ..clock_state
+                    };
+                    if next_state != clock_state {
+                        clock_state = next_state;
+                        rtc_state.send(clock_state);
+                    }
+                    warn!("RTC health check failed; local clock retained");
+                }
+            }
+        }
+
         let mut fresh_mask = 0u16;
         if let Some(measurement) = sht41_measure(&mut i2c).await {
             snapshot.sht41_temperature_centi_c = measurement.0;
@@ -164,6 +277,50 @@ pub async fn run<I2C>(
             fresh_mask,
         });
         Timer::after(Duration::from_secs(1)).await;
+    }
+}
+
+async fn process_rtc_commands<I2C>(
+    i2c: &mut I2C,
+    rtc: &mut Ds3231,
+    commands: &Receiver<'static, CriticalSectionRawMutex, RtcCommand, 4>,
+    clock_state: &mut ClockState,
+    rtc_state: &WatchSender<'static, CriticalSectionRawMutex, ClockState, 1>,
+    clock_events: &Sender<'static, CriticalSectionRawMutex, ClockEvent, 4>,
+    responses: &'static Signal<CriticalSectionRawMutex, RtcResponse>,
+) where
+    I2C: I2c,
+{
+    while let Ok(command) = commands.try_receive() {
+        match command {
+            RtcCommand::SetUnix(unix_seconds) => match rtc.set_unix(i2c, unix_seconds).await {
+                Ok(sample) => {
+                    let monotonic_seconds = Instant::now().as_secs();
+                    *clock_state = ClockState::anchored(sample.unix_seconds, monotonic_seconds);
+                    rtc_state.send(*clock_state);
+                    clock_events
+                        .send(ClockEvent::Anchored {
+                            unix_seconds: sample.unix_seconds,
+                            monotonic_seconds,
+                        })
+                        .await;
+                    responses.signal(RtcResponse {
+                        success: true,
+                        state: *clock_state,
+                    });
+                    info!("RTC synchronized: unix={}", sample.unix_seconds);
+                }
+                Err(_) => {
+                    clock_state.read_error = true;
+                    rtc_state.send(*clock_state);
+                    responses.signal(RtcResponse {
+                        success: false,
+                        state: *clock_state,
+                    });
+                    warn!("RTC synchronization failed; local clock retained");
+                }
+            },
+        }
     }
 }
 

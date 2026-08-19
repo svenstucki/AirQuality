@@ -106,9 +106,13 @@
     .status-value { height: 35px; min-height: 35px; gap: 9px; margin-top: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.03em; }
     .status-card > .health-badge { height: 35px; margin-top: 0; }
     .status-detail { display: flex; align-items: center; height: 35px; min-height: 35px; margin: 0; color: var(--muted); font-size: 11px; }
-    .controls-panel { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: center; }
+    .controls-panel { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: flex-start; }
     .controls-panel h2 { margin-bottom: 5px; }
-    .control-row { flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
+    .control-row { flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; gap: 9px; }
+    .rtc-readout { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; margin-top: 16px; }
+    .rtc-readout .status-detail { height: auto; min-height: 0; margin: 0; }
+    .rtc-readout .rtc-comparison { flex-basis: 100%; }
+    .rtc-readout .status-value { display: inline; height: auto; min-height: 0; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 17px; line-height: 1.2; font-weight: 700; letter-spacing: 0; }
     .range-line { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 13px; color: var(--muted); font-size: 12px; }
 
     .retrieval-panel { padding-bottom: 17px; }
@@ -182,9 +186,9 @@
       </div>
       <div class="status-grid">
         <article class="status-card"><h3>Storage</h3><div id="storage-enabled" class="health-badge offline">Offline</div><p class="status-detail">Persistent logging</p></article>
-        <article class="status-card"><h3>Board clock</h3><div id="clock-status" class="health-badge offline">Offline</div><p id="clock-detail" class="status-detail">Sync required after reboot</p></article>
+        <article class="status-card"><h3>History clock</h3><div id="clock-status" class="health-badge offline">Offline</div><p id="clock-detail" class="status-detail">Clock not set</p></article>
+        <article class="status-card"><h3>RTC health</h3><div id="rtc-health" class="health-badge offline">Offline</div><p id="rtc-health-detail" class="status-detail">Connect to read RTC status</p></article>
         <article class="status-card"><h3>Records</h3><div id="record-count" class="status-value">—</div><p class="status-detail">Stored measurements</p></article>
-        <article class="status-card"><h3>Coverage</h3><div id="coverage" class="status-value">—</div><p class="status-detail">Approximate archive span</p></article>
         <article class="status-card"><h3>Oldest</h3><div id="oldest-time" class="status-value">—</div><p id="oldest-detail" class="status-detail">—</p></article>
         <article class="status-card"><h3>Newest</h3><div id="newest-time" class="status-value">—</div><p id="newest-detail" class="status-detail">—</p></article>
       </div>
@@ -195,12 +199,18 @@
         <div>
           <p class="eyebrow">Board controls</p>
           <h2 id="controls-heading">History and clock</h2>
-          <p class="helper">Clock sync uses this computer’s current UTC time. New records after synchronization are stored as UTC; rebooting requires synchronization again.</p>
+          <p class="helper">Use the controls below to synchronize the board clock with this computer's current UTC time and manage stored history.</p>
+          <div class="rtc-readout">
+            <span class="status-detail">Board time</span>
+            <strong id="rtc-time" class="status-value">—</strong>
+            <span id="rtc-detail" class="status-detail rtc-comparison">Connect to read board time</span>
+          </div>
           <div class="range-line"><span>Storage region: <code>0x200000–0x400000</code></span><span>Capacity: approximately 30 days</span></div>
         </div>
         <div class="control-row">
           <button id="storage-toggle" class="button secondary" type="button" disabled>Enable storage</button>
           <button id="sync-clock" class="button secondary" type="button" disabled>Sync board clock</button>
+          <button id="refresh-rtc" class="button secondary" type="button" disabled>Read board time</button>
           <button id="erase-history" class="button danger" type="button" disabled>Erase history</button>
         </div>
       </div>
@@ -278,14 +288,20 @@
 
       const DEVICE_NAME = 'AirQuality';
       const STORAGE_SERVICE_UUID = '7c3e3000-4e0a-4a69-9c57-6b5f3f1c0000';
+      const RTC_SERVICE_UUID = '7c3e4000-4e0a-4a69-9c57-6b5f3f1c0000';
       const UUID = {
         control: '7c3e3001-4e0a-4a69-9c57-6b5f3f1c0000',
         clockSync: '7c3e3002-4e0a-4a69-9c57-6b5f3f1c0000',
         metadata: '7c3e3003-4e0a-4a69-9c57-6b5f3f1c0000',
         historyRequest: '7c3e3004-4e0a-4a69-9c57-6b5f3f1c0000',
         historyData: '7c3e3005-4e0a-4a69-9c57-6b5f3f1c0000',
-        erase: '7c3e3006-4e0a-4a69-9c57-6b5f3f1c0000'
+        erase: '7c3e3006-4e0a-4a69-9c57-6b5f3f1c0000',
+        rtcTime: '7c3e4001-4e0a-4a69-9c57-6b5f3f1c0000'
       };
+      const RTC_CLOCK_VALID = 1;
+      const RTC_VALID = 2;
+      const RTC_OSF = 4;
+      const RTC_READ_ERROR = 8;
       const RECORD_SIZE = 44;
       const HISTORY_PAGE_SIZE = 5;
       const FIRST_CURSOR = 0xffffffff;
@@ -314,12 +330,14 @@
         connected: false,
         busy: false,
         metadata: null,
+        rtc: null,
         records: [],
         segments: [],
         selectedMetric: 'scd41Co2',
         selectedSegment: 'latest',
         pendingPage: null,
         metadataRefreshTimer: null,
+        rtcRefreshTimer: null,
         chartPoints: [],
         chartPlot: null
       };
@@ -330,6 +348,7 @@
       const connectButton = $('connect-button');
       const storageToggle = $('storage-toggle');
       const syncClockButton = $('sync-clock');
+      const refreshRtcButton = $('refresh-rtc');
       const eraseButton = $('erase-history');
       const retrieveButton = $('retrieve-button');
       const clearButton = $('clear-button');
@@ -367,6 +386,7 @@
         const enabled = state.connected && !state.busy;
         storageToggle.disabled = !enabled || !state.metadata;
         syncClockButton.disabled = !enabled;
+        refreshRtcButton.disabled = !enabled || !characteristics.rtcTime;
         eraseButton.disabled = !enabled;
         retrieveButton.disabled = !enabled || !characteristics.historyRequest;
         clearButton.disabled = state.busy || state.records.length === 0;
@@ -379,15 +399,6 @@
         return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(value);
       }
 
-      function formatDuration(seconds) {
-        if (!Number.isFinite(seconds) || seconds < 0) return '—';
-        const minutes = Math.round(seconds / 60);
-        if (minutes < 60) return minutes + ' min';
-        const hours = Math.floor(minutes / 60);
-        if (hours < 48) return hours + ' h';
-        return formatNumber(hours / 24, 1) + ' d';
-      }
-
       function formatUptime(seconds) {
         if (!Number.isFinite(seconds)) return '—';
         const days = Math.floor(seconds / 86400);
@@ -396,6 +407,63 @@
         if (days) return 'up ' + days + 'd ' + hours + 'h';
         if (hours) return 'up ' + hours + 'h ' + minutes + 'm';
         return 'up ' + minutes + 'm';
+      }
+
+      function formatBoardTime(seconds) {
+        return new Date(seconds * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'medium' });
+      }
+
+      function formatOffset(seconds) {
+        if (!Number.isFinite(seconds)) return '—';
+        if (Math.abs(seconds) < 0.005) return '0.00 s';
+        return (seconds >= 0 ? '+' : '') + seconds.toFixed(2) + ' s';
+      }
+
+      function parseRtcTime(view) {
+        if (view.byteLength < 5) throw new Error('RTC time has an invalid length');
+        const flags = view.getUint8(4);
+        return {
+          unixSeconds: view.getUint32(0, true),
+          flags,
+          clockValid: (flags & RTC_CLOCK_VALID) !== 0,
+          rtcValid: (flags & RTC_VALID) !== 0,
+          oscillatorStopped: (flags & RTC_OSF) !== 0,
+          readError: (flags & RTC_READ_ERROR) !== 0
+        };
+      }
+
+      function renderRtc() {
+        const rtc = state.rtc;
+        if (!rtc) {
+          $('rtc-time').textContent = '—';
+          $('rtc-detail').textContent = state.connected ? 'Waiting for board time' : 'Connect to read RTC time';
+          $('rtc-health').textContent = state.connected ? 'Unknown' : 'Offline';
+          $('rtc-health').className = 'health-badge ' + (state.connected ? 'stale' : 'offline');
+          $('rtc-health-detail').textContent = 'Connect to read RTC status';
+          return;
+        }
+        $('rtc-time').textContent = rtc.clockValid ? formatBoardTime(rtc.unixSeconds) : 'Not set';
+        const comparison = rtc.offsetSeconds === null
+          ? 'No local comparison available'
+          : 'Local difference ' + formatOffset(rtc.offsetSeconds) + ' · RTT ' + Math.round(rtc.rttMs) + ' ms ±' + Math.round(rtc.rttMs / 2) + ' ms';
+        $('rtc-detail').textContent = rtc.clockValid ? comparison : 'No valid local board clock';
+        if (rtc.oscillatorStopped) {
+          $('rtc-health').textContent = 'OSF set';
+          $('rtc-health').className = 'health-badge stale';
+          $('rtc-health-detail').textContent = 'Oscillator stop flag set; local clock retained';
+        } else if (rtc.readError) {
+          $('rtc-health').textContent = 'Read error';
+          $('rtc-health').className = 'health-badge stale';
+          $('rtc-health-detail').textContent = 'Latest RTC read failed; local clock retained';
+        } else if (rtc.rtcValid) {
+          $('rtc-health').textContent = 'Healthy';
+          $('rtc-health').className = 'health-badge good';
+          $('rtc-health-detail').textContent = 'Oscillator stop flag clear';
+        } else {
+          $('rtc-health').textContent = 'Not valid';
+          $('rtc-health').className = 'health-badge stale';
+          $('rtc-health-detail').textContent = 'Set time with BLE sync';
+        }
       }
 
       function formatRecordTime(record, includeMode = false) {
@@ -530,22 +598,31 @@
         setConnectionState('connecting');
         showNotice('');
         try {
-          state.device = await navigator.bluetooth.requestDevice({ filters: [{ name: DEVICE_NAME }], optionalServices: [STORAGE_SERVICE_UUID] });
+          state.device = await navigator.bluetooth.requestDevice({ filters: [{ name: DEVICE_NAME }], optionalServices: [STORAGE_SERVICE_UUID, RTC_SERVICE_UUID] });
           state.device.addEventListener('gattserverdisconnected', handleDisconnected);
           state.server = await state.device.gatt.connect();
           const service = await state.server.getPrimaryService(STORAGE_SERVICE_UUID);
-          for (const [name, uuid] of Object.entries(UUID)) characteristics[name] = await service.getCharacteristic(uuid);
+          for (const [name, uuid] of Object.entries(UUID)) {
+            if (name !== 'rtcTime') characteristics[name] = await service.getCharacteristic(uuid);
+          }
+          const rtcService = await state.server.getPrimaryService(RTC_SERVICE_UUID);
+          characteristics.rtcTime = await rtcService.getCharacteristic(UUID.rtcTime);
           characteristics.historyData.addEventListener('characteristicvaluechanged', handleHistoryNotification);
           await characteristics.historyData.startNotifications();
+          characteristics.rtcTime.addEventListener('characteristicvaluechanged', handleRtcNotification);
+          await characteristics.rtcTime.startNotifications();
           state.connected = true;
           setConnectionState('connected');
           // Metadata is read-only (the firmware does not notify it). The
           // firmware populates it after waiting for the first sensor update,
           // so retry twice if the initial read still contains the default zeroes.
           await refreshMetadata(2);
+          await refreshRtcTime();
           startMetadataRefresh();
+          startRtcRefresh();
         } catch (error) {
           stopMetadataRefresh();
+          stopRtcRefresh();
           state.connected = false;
           state.server = null;
           Object.keys(characteristics).forEach(key => delete characteristics[key]);
@@ -559,6 +636,7 @@
 
       function handleDisconnected() {
         stopMetadataRefresh();
+        stopRtcRefresh();
         if (state.pendingPage) {
           clearTimeout(state.pendingPage.timeout);
           state.pendingPage.reject(new Error('The sensor disconnected during history retrieval'));
@@ -566,8 +644,10 @@
         }
         state.connected = false;
         state.server = null;
+        state.rtc = null;
         Object.keys(characteristics).forEach(key => delete characteristics[key]);
         setConnectionState('disconnected');
+        renderRtc();
         showNotice('The sensor disconnected. Retrieved local data is still available for viewing and export.');
       }
 
@@ -582,6 +662,21 @@
           if (!state.connected || state.busy) return;
           refreshMetadata().catch(error => console.warn('Could not refresh storage metadata', error));
         }, 60000);
+      }
+
+      function startRtcRefresh() {
+        stopRtcRefresh();
+        state.rtcRefreshTimer = setInterval(() => {
+          if (!state.connected || state.busy) return;
+          refreshRtcTime().catch(error => console.warn('Could not read RTC time', error));
+        }, 30000);
+      }
+
+      function stopRtcRefresh() {
+        if (state.rtcRefreshTimer !== null) {
+          clearInterval(state.rtcRefreshTimer);
+          state.rtcRefreshTimer = null;
+        }
       }
 
       function stopMetadataRefresh() {
@@ -602,6 +697,38 @@
         }
       }
 
+      async function refreshRtcTime() {
+        if (!characteristics.rtcTime || !state.connected) return null;
+        const localBefore = Date.now();
+        const perfBefore = performance.now();
+        const value = await characteristics.rtcTime.readValue();
+        const localAfter = Date.now();
+        const parsed = parseRtcTime(value);
+        const rttMs = performance.now() - perfBefore;
+        const localMidpointSeconds = (localBefore + localAfter) / 2000;
+        state.rtc = {
+          ...parsed,
+          rttMs,
+          offsetSeconds: parsed.clockValid ? parsed.unixSeconds - localMidpointSeconds : null
+        };
+        renderRtc();
+        return state.rtc;
+      }
+
+      function handleRtcNotification(event) {
+        try {
+          const parsed = parseRtcTime(event.target.value);
+          state.rtc = {
+            ...parsed,
+            rttMs: state.rtc ? state.rtc.rttMs : 0,
+            offsetSeconds: state.rtc ? state.rtc.offsetSeconds : null
+          };
+          renderRtc();
+        } catch (error) {
+          console.warn('Could not decode RTC notification', error);
+        }
+      }
+
       function renderMetadata() {
         const metadata = state.metadata;
         if (!metadata) {
@@ -610,7 +737,6 @@
           $('clock-status').textContent = '—';
           $('clock-status').className = 'health-badge offline';
           $('record-count').textContent = '—';
-          $('coverage').textContent = '—';
           $('oldest-time').textContent = '—';
           $('newest-time').textContent = '—';
           $('oldest-detail').textContent = '—';
@@ -622,10 +748,8 @@
         $('storage-enabled').className = 'health-badge ' + (metadata.enabled ? 'good' : 'stale');
         $('clock-status').textContent = metadata.clockSynchronized ? 'Synchronized' : 'Needs sync';
         $('clock-status').className = 'health-badge ' + (metadata.clockSynchronized ? 'good' : 'stale');
-        $('clock-detail').textContent = metadata.clockSynchronized ? 'New records use UTC' : 'New records use uptime';
+        $('clock-detail').textContent = metadata.clockSynchronized ? 'UTC timestamps' : 'Clock not set';
         $('record-count').textContent = formatNumber(metadata.recordCount);
-        const sameDomain = metadata.oldestUtc === metadata.newestUtc && metadata.newestTimestamp >= metadata.oldestTimestamp;
-        $('coverage').textContent = metadata.recordCount < 2 ? '—' : sameDomain ? formatDuration(metadata.newestTimestamp - metadata.oldestTimestamp) : 'Mixed';
         $('oldest-time').textContent = metadata.recordCount ? formatRangeTime(metadata.oldestTimestamp, metadata.oldestUtc) : '—';
         $('newest-time').textContent = metadata.recordCount ? formatRangeTime(metadata.newestTimestamp, metadata.newestUtc) : '—';
         $('oldest-detail').textContent = metadata.recordCount ? (metadata.oldestUtc ? 'UTC' : 'uptime') + ' · seq ' + metadata.oldestSequence : '—';
@@ -656,8 +780,23 @@
           const unixSeconds = Math.floor(Date.now() / 1000);
           await writeCharacteristic(characteristics.clockSync, writeUint32(unixSeconds));
           await refreshMetadata();
+          const rtc = await refreshRtcTime();
+          if (rtc && !rtc.clockValid) {
+            showNotice('The RTC did not accept the synchronization time. Check the RTC connection.', 'warning');
+          } else {
+            showNotice('RTC and board clock synchronized.', 'success');
+          }
         } catch (error) {
           showNotice('Could not synchronize the board clock: ' + (error.message || error.name));
+        } finally { setBusy(false); }
+      }
+
+      async function refreshRtcFromButton() {
+        setBusy(true);
+        try {
+          await refreshRtcTime();
+        } catch (error) {
+          showNotice('Could not read board time: ' + (error.message || error.name));
         } finally { setBusy(false); }
       }
 
@@ -991,6 +1130,7 @@
         storageToggle.addEventListener('click', toggleStorage);
         syncClockButton.addEventListener('click', syncClock);
         eraseButton.addEventListener('click', eraseHistory);
+        refreshRtcButton.addEventListener('click', refreshRtcFromButton);
         retrieveButton.addEventListener('click', retrieveHistory);
         clearButton.addEventListener('click', clearLocalData);
         exportButton.addEventListener('click', exportCsv);
@@ -1002,6 +1142,7 @@
         window.addEventListener('resize', drawChart);
         renderMetadata();
         renderHistory();
+        renderRtc();
         setConnectionState('disconnected');
       }
 
