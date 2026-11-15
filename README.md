@@ -47,3 +47,16 @@ Open [`hardware/AirQuality.kicad_pro`](hardware/AirQuality.kicad_pro)
 with KiCad. The project README documents the module interconnects and layout
 considerations. The fabrication archive and generated schematic PDF are in
 [`hardware/fabrication/`](hardware/fabrication/).
+
+## Security
+
+The BLE services are unauthenticated: any nearby device can read the sensor
+values, change the LED color, set the clock, and erase the stored history.
+Treat the device as suitable for trusted environments only.
+
+## License
+
+- Firmware and dashboards: [MIT License](LICENSE).
+- Hardware design files and fabrication artifacts in [`hardware/`](hardware/):
+  [CERN Open Hardware Licence Version 2 - Permissive](hardware/LICENSE)
+  (CERN-OHL-P-2.0).

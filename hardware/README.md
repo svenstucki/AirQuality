@@ -4,16 +4,18 @@ KiCad 9 PCB project for an ESP32-C6-based air-quality sensor board. The board
 combines several prebuilt modules on one PCB and connects them through one shared
 3.3 V I2C bus.
 
-## Current Project State
+## Project Files
 
 - `AirQuality.kicad_pro`: KiCad 9 project file.
-- `AirQuality.kicad_sch`: root schematic with all module placeholders placed,
-  shared I2C wiring, power symbols, and I2C pull-up resistors.
-- `AirQuality.kicad_pcb`: PCB layout for the module-based board.
+- `AirQuality.kicad_sch`: root schematic with all modules, shared I2C wiring,
+  power symbols, and I2C pull-up resistors.
+- `AirQuality.kicad_pcb`: routed PCB layout with the six module footprints,
+  the two pull-up resistors, and M3 mounting holes.
+- `fabrication/`: dated Gerber/drill archives and matching schematic PDFs for
+  each tapeout. The most recent date supersedes the earlier ones.
 
-Future agents should treat this as an early-stage hardware project: capture the
-module interconnects first, then create or assign verified footprints from the
-actual modules in hand.
+The design notes below record the reasoning behind the board and are useful
+when adapting it to different modules.
 
 ## Modules
 
@@ -30,15 +32,27 @@ There are no address conflicts in this set.
 
 ## Project Libraries
 
-The project has local placeholder libraries at the project root:
+The project has local module libraries at the project root:
 
 - `AirQuality.kicad_sym`: schematic symbols for each module.
-- `AirQuality.pretty/`: footprint library with matching placeholder footprints.
+- `AirQuality.pretty/`: footprint library with one footprint per module.
 - `sym-lib-table` and `fp-lib-table`: project-local KiCad library tables.
 
-These placeholders intentionally model only the module pin-header blocks. Keep
-using them until the exact physical module dimensions, outlines, and mounting
-details are verified.
+Each footprint models a breakout module as a whole rather than the bare sensor
+IC: the pin-header pads at 2.54 mm pitch plus the module body outline.
+
+| Footprint | Body | Header |
+| --- | --- | --- |
+| Nano ESP32-C6 | 28 mm x 46 mm, plus 18 mm x 8 mm antenna protrusion | two 1x15 rows, 25.4 mm apart |
+| DS3231 RTC | 14 mm x 14 mm | 1x05 |
+| SGP41 | 13 mm x 10 mm | 1x04 |
+| SCD41 | 22 mm x 13 mm | 1x04 |
+| SHT41 | 12 mm x 10 mm | 1x04 |
+| BMP580 | 14 mm x 10 mm | two 1x04 rows, 12 mm apart |
+
+Breakout modules for the same sensor differ between vendors. Check these
+dimensions and the pin order against the modules you have before ordering
+boards.
 
 The DS3231 RTC symbol intentionally exposes only four functional schematic pins,
 but its assigned footprint is a 1x05 header. Physical header pin 4 is present and
@@ -72,10 +86,10 @@ left unconnected; the symbol maps its fourth functional pin to footprint pad 5.
 - Prefer powering every module from `3V3` unless the exact module documentation
   proves that another supply arrangement is required and does not pull SDA/SCL
   above 3.3 V.
-- Do not add `PWR_FLAG` symbols just to silence ERC in this placeholder
-  schematic. The modules are powered from external/module headers for now, so
-  ignore ERC `power_pin_not_driven` messages until a real onboard power source or
-  regulator is added.
+- The board has no onboard power source or regulator; power arrives through
+  the module headers. ERC `power_pin_not_driven` messages are therefore
+  expected, and the schematic deliberately has no `PWR_FLAG` symbols to
+  silence them.
 
 ## ESP32-C6 Pin Notes
 
@@ -84,15 +98,13 @@ numbers: `L1`-`L15` for the left side top-to-bottom and `R1`-`R15` for the right
 side top-to-bottom. This avoids duplicate `1`-`15` pin numbers while matching
 the module pin tables.
 
-The ESP32-C6 has low-power I2C functions on GPIO6/GPIO7 in Espressif reference
-development boards. The Nano ESP32-C6 Tindie listing says I2C is broken out, but
-the exact Nano board pin labels and header geometry still need to be verified
-from the seller documentation or by measuring the board before assigning the
-footprint.
+The firmware uses GPIO6 for SDA and GPIO7 for SCL, which are also the
+low-power I2C pins on Espressif reference development boards.
 
-Do not route the PCB from assumptions about Arduino-style labels alone. Confirm:
+When substituting a different ESP32-C6 board, do not rely on Arduino-style
+labels alone. Confirm:
 
-- Which Nano ESP32-C6 pins expose SDA and SCL.
+- Which header pins expose GPIO6 and GPIO7.
 - Header pitch, row spacing, board outline, USB-C keepout, antenna keepout, and
   mounting constraints.
 - Whether the Nano board regulator can supply all attached modules with enough
@@ -145,13 +157,9 @@ Add test points for `3V3`, `GND`, `I2C_SDA`, and `I2C_SCL` if there is room.
 - Adafruit BMP58xx breakout pinout notes:
   https://learn.adafruit.com/adafruit-bmp580-bmp581-and-bmp585-temperature-and-pressure-sensor/pinouts
 
-## Next Steps
+## Licence
 
-1. Verify the exact physical modules and capture measured dimensions.
-2. Verify whether any module breakout already provides I2C pull-ups; remove or
-   mark `R1`/`R2` DNP if the combined pull-up is too strong.
-3. Create or import verified footprints for the exact module boards.
-4. Update the PCB from the schematic and place the module footprints.
-5. Add board outline, mounting holes, antenna keepout, and airflow-conscious
-   placement.
-6. Run KiCad ERC/DRC before producing fabrication outputs.
+The hardware design files in this directory are licensed under the
+[CERN Open Hardware Licence Version 2 - Permissive](LICENSE) (CERN-OHL-P-2.0).
+
+Copyright (c) 2026 Sven Stucki

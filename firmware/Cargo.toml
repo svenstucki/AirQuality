@@ -2,6 +2,9 @@
 name = "air-quality"
 version = "0.1.0"
 edition = "2024"
+description = "ESP32-C6 air-quality sensor firmware with BLE and persistent history"
+license = "MIT"
+repository = "https://github.com/svenstucki/AirQuality"
 publish = false
 
 [dependencies]
